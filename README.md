@@ -6,13 +6,13 @@ Here's the thing about software: it fails. Not sometimes. **Always**.
 
 The database decides to take a nap right when you need it. The payment provider goes for a coffee break. The user types "banana" where you expected a number.
 
-Most programmers treat errors like embarrassing relatives, they pretend they don't exist until they show up drunk at the family reunion and ruin everything.
+Most programmers treat errors like embarrassing relatives: they pretend they don't exist until they show up drunk at the family reunion and ruin everything.
 
 But what if we treated errors as first-class citizens? What if failure was just another path through our code, not a derailment?
 
 ## The Problem: Building a Payment System That Won't Bankrupt You
 
-Let's say you're building a payment system. Not a toy one, a real one that handles actual money and can't afford to lose a penny or charge someone twice.
+Let's say you're building a payment system. Not a toy one: a real one that handles actual money and can't afford to lose a penny or charge someone twice.
 
 Here's what needs to happen:
 
@@ -91,7 +91,7 @@ graph LR
 
 ### 🎭 The Optimist (try/catch)
 
-_"Everything will work fine... oh crap, something broke, quick, catch it!"_
+"Everything will work fine... oh crap, something broke, quick, catch it!"
 
 This is the approach most developers know and love. Write your code assuming everything will work perfectly. When reality intrudes (and it will), let the exception bubble up until someone, somewhere, catches it.
 
@@ -142,24 +142,35 @@ flowchart TD
     P5 -."💥 throw".-> N4
 ```
 
-**Good for:** Simple cases, getting started quickly  
-**Not so good for:** Complex business logic, when you need to handle different errors differently
+**When to use this:**
 
-**Why this feels wrong (sometimes):**
+Use try/catch for simple operations, rapid prototyping, or at system boundaries (HTTP handlers, event listeners) where you need to catch all unexpected errors and return a 500 response.
 
-**The function signature lies.** It says `Promise<{paymentId: string}>` but what it really means is `Promise<{paymentId: string} | ExplosiveError>`. You won't know about those 5 different ways it can fail until runtime teaches you the hard way.
+**The limitations:**
 
-**The happy path is interrupted by reality.** Try following the success story through the code. Good luck, it's scattered between try/catch blocks like a Where's Waldo puzzle.
+**Function signatures hide failure modes**
 
-**The compiler won't help you.** Forget to catch an error? The TypeScript compiler shrugs and wishes you luck. You'll discover your mistake at 3 AM when the payments are down.
+The signature says `Promise<{paymentId: string}>` but conceals 5+ different error types. You discover missing error handlers at runtime, usually in production.
 
-Don't get me wrong, this approach works great at system boundaries. HTTP controllers, event handlers, that sort of thing. But in your core business logic? It's like doing surgery with oven mitts.
+**Happy path becomes scattered**
+
+The success flow is interrupted by defensive try/catch blocks. Following the business logic requires jumping between success cases and error handling.
+
+**No static analysis of error paths**
+
+TypeScript cannot verify that you've handled all error cases. Forget to catch an error? The compiler shrugs. You find out when the pager goes off.
+
+**Composition breaks down**
+
+Calling this from another function requires wrapping it in another try/catch. The complexity multiplies exponentially with each layer of abstraction.
+
+Don't get me wrong: this approach works great at system boundaries. HTTP controllers, event handlers, that sort of thing. But in your core business logic? It's like doing surgery with oven mitts.
 
 ---
 
 ### 🚂 The Realist (neverthrow)
 
-_"Half of everything breaks, so let's plan for that from the start"_
+"Half of everything breaks, so let's plan for that from the start"
 
 Here's a radical idea: what if failure wasn't a surprise? What if your functions were honest about what could go wrong, and the compiler actually helped you handle it?
 
@@ -190,8 +201,8 @@ async function makePayment(
 
 Think of it like this: every function returns a train that's either on the success track or the error track. The train carries a `Result<Success, Error>` that's either:
 
-- `Ok(value)` - "All good, staying on the success track"
-- `Err(error)` - "Something went wrong, switching to the error track"
+- `Ok(value)`: "All good, staying on the success track"
+- `Err(error)`: "Something went wrong, switching to the error track"
 
 ```mermaid
 flowchart LR
@@ -228,14 +239,19 @@ flowchart LR
 
 Here's the clever bit: once you're on the error track, you stay there until someone explicitly handles it. No more surprises. No more "oh wait, this could actually throw an exception."
 
-**Good for:** When you want to be explicit about what can go wrong  
-**Not so good for:** Simple scripts, when your team is new to functional programming
+**When to use this:**
 
-**Why this feels better (once you get used to it):**
+Use neverthrow when your business logic has multiple failure modes that need different handling, when you need composable error handling, or when you're building systems where reliability matters more than development speed.
 
-**The signature doesn't lie.** When you see `ResultAsync<{paymentId: string}, Error>`, you know exactly what you're getting: either a payment ID or an error. No surprises, no hidden exceptions.
+**Why this works better:**
 
-**Composition actually works.** Look at this beauty:
+**Function signatures are honest**
+
+`ResultAsync<{paymentId: string}, Error>` tells you exactly what you're getting: either a payment ID or an error. No surprises, no hidden exceptions. The type system enforces error handling at compile time.
+
+**Composition is natural**
+
+Look at this beauty:
 
 ```typescript
 return parse(raw)
@@ -246,21 +262,23 @@ return parse(raw)
   .orElse((error) => handleSpecificErrors(error));
 ```
 
-It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler.
+It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
 
-**Errors become data.** Instead of exceptions flying around, you have error values you can inspect, transform, and reason about. Want to log all validation errors differently from database errors? Easy.
+**Errors are data, not control flow**
+
+Instead of exceptions flying around, you have error values you can inspect, transform, and reason about. Want to log all validation errors differently from database errors? Easy. Want to retry only certain error types? Trivial.
 
 ---
 
 ### 🏗️ The Architect (Effect)
 
-_"Let's describe exactly what should happen, then let the system figure it out"_
+"Let's describe exactly what should happen, then let the system figure it out"
 
-Here's where things get interesting. What if you didn't write code to _do_ things, but instead wrote code to _describe_ what should be done?
+Here's where things get interesting. What if you didn't write code to do things, but instead wrote code to describe what should be done?
 
 What if timeouts, retries, logging, and dependency injection weren't scattered throughout your code like confetti, but were declared upfront as policies?
 
-Welcome to Effect, where you're not a programmer, you're an architect drawing blueprints.
+Welcome to Effect, where you're not a programmer: you're an architect drawing blueprints.
 
 ```typescript
 import { Effect } from 'effect';
@@ -330,12 +348,15 @@ flowchart TD
 
 Then you hand the blueprint to a runtime engineer who actually builds and operates the factory.
 
-**Good for:** Complex systems, when you want consistent policies across your app  
-**Not so good for:** Simple tasks, when you need something working by Friday
+**When to use this:**
 
-**Why you might want this (warning: it's addictive):**
+Use Effect when you need sophisticated orchestration patterns (retries, timeouts, circuit breakers), when testability is critical, when you want consistent policies across your entire application, or when your team has bandwidth to learn functional programming concepts.
 
-**Policies become first-class citizens.** Want to retry with exponential backoff? That's not scattered implementation code, that's a policy you declare:
+**Why you might want this:**
+
+**Policies become first-class citizens**
+
+Want to retry with exponential backoff? That's not scattered implementation code: that's a policy you declare once and reuse everywhere:
 
 ```typescript
 const retryPolicy = Schedule.exponential(200).pipe(
@@ -349,7 +370,9 @@ const program = callProvider.pipe(
 );
 ```
 
-**Testing becomes trivial.** Same program, different reality:
+**Testing becomes straightforward**
+
+Same program, different reality:
 
 ```typescript
 // Production: real database, real payment provider
@@ -362,7 +385,9 @@ const testLayer = Layer.merge(DbService.test, ProviderService.mock);
 await Effect.runPromise(program.pipe(Effect.provide(testLayer)));
 ```
 
-**Everything composes beautifully.** Same retry logic everywhere. Consistent error handling across your entire app. Want to add tracing? Add it once, get it everywhere.
+**Everything composes beautifully**
+
+Same retry logic everywhere. Consistent error handling across your entire app. Want to add tracing? Add it once, get it everywhere.
 
 ---
 
@@ -370,26 +395,26 @@ await Effect.runPromise(program.pipe(Effect.provide(testLayer)));
 
 Here's the honest truth: **it depends on what you're building**.
 
-### Start with try/catch if
+### Start with try/catch if:
 
-- You're building something simple
-- Your team is learning JavaScript/TypeScript
-- You need to ship quickly
-- You're working at the "edges" (HTTP handlers, etc.)
+- You're building something simple with straightforward error handling
+- Your team is learning JavaScript/TypeScript fundamentals
+- You need to ship quickly and iteration speed matters more than compile-time safety
+- You're working at system boundaries (HTTP handlers, event listeners) where you need to catch all errors
 
-### Consider neverthrow when
+### Consider neverthrow when:
 
-- Your business logic is getting complex
-- You want the compiler to help you handle errors
-- You're tired of forgetting to catch exceptions
-- You like the idea of errors being values instead of explosions
+- Your business logic has multiple failure modes that need different handling
+- You want the compiler to verify that you've handled all error cases
+- You're tired of forgetting to catch exceptions and discovering them in production
+- You need composable error handling that works well with functional patterns
 
-### Look at Effect when
+### Look at Effect when:
 
-- You have complex requirements (timeouts, retries, etc.)
-- You want excellent testability
-- Your team enjoys learning new concepts
-- You're building something that needs to scale
+- You need sophisticated orchestration (timeouts, retries, circuit breakers, rate limiting)
+- Testability is critical and you want pure dependency injection
+- You want consistent policies applied uniformly across your application
+- Your team has capacity to learn functional programming concepts and advanced abstractions
 
 ## The Decision Tree
 
@@ -463,7 +488,7 @@ Notice how the function signatures tell different stories:
 
 Here's what I've learned after years of building systems that break in creative ways:
 
-**Errors aren't bugs - they're features.** The difference between a junior developer and a senior developer isn't that the senior writes bug-free code. It's that the senior developer has learned to design around the inevitable failure.
+**Errors aren't bugs: they're features.** The difference between a junior developer and a senior developer isn't that the senior writes bug-free code. It's that the senior developer has learned to design around the inevitable failure.
 
 **The question isn't whether to handle errors.** The question is: how do you make error handling:
 
