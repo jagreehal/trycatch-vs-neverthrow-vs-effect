@@ -1,6 +1,6 @@
 # Advanced Error Handling: The Complete Guide
 
-_Deep dive into implementation details, migration strategies, and battle-tested patterns_
+**Deep dive into implementation details, migration strategies, and battle-tested patterns**
 
 This document assumes you've read the [README.md](./README.md) and want to understand these error handling approaches in depth.
 
@@ -16,7 +16,7 @@ This document assumes you've read the [README.md](./README.md) and want to under
 
 ## Complete Implementation Examples
 
-Let's build a realistic payment processing system using all three approaches. This isn't toy code, it's the kind of system that handles real money and can't afford to lose a penny.
+Let's build a realistic payment processing system using all three approaches. This isn't toy code: it's the kind of system that handles real money and can't afford to lose a penny.
 
 ### Shared Types and Infrastructure
 
@@ -208,10 +208,21 @@ export async function createPaymentVanilla(
 
 **What makes this challenging:**
 
-- Function signature lies: `Promise<{paymentId: string}>` doesn't tell you about the 5 ways it can fail
-- Happy path is interrupted by reality scattered between try/catch blocks
-- Composition is painful, calling this from another function requires more try/catch layers
-- The compiler can't help you handle errors systematically
+**1. Function signature lies**
+
+It says `Promise<{paymentId: string}>` but doesn't tell you about the 5 ways it can fail.
+
+**2. Happy path is scattered**
+
+Try following the success story through the code. Good luck finding it between all the try/catch blocks.
+
+**3. Composition is painful**
+
+Calling this from another function requires more try/catch layers. The complexity multiplies.
+
+**4. The compiler can't help**
+
+TypeScript shrugs and wishes you luck. You'll discover missing error handling at 3 AM when payments are down.
 
 ### Approach 2: The Realist (neverthrow)
 
@@ -358,7 +369,7 @@ export function createPaymentNeverthrow(
       (existing) => (existing ? { paymentId: existing.id } : input)
     );
 
-  // Main pipeline - pure functional composition
+  // Main pipeline: pure functional composition
   return parseInput()
     .asyncAndThen((input) => checkExisting(input))
     .andThen((result) => {
@@ -391,10 +402,21 @@ export function createPaymentNeverthrow(
 
 **What makes this better:**
 
-- Honest signatures: `ResultAsync<{paymentId: string}, Error>` tells you exactly what to expect
-- Composable: Chain operations with `andThen`, handle errors with `orElse`
-- No surprises: Errors are values you can inspect, log, transform, and recover from
-- Gradual adoption: Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece
+**1. Honest signatures**
+
+`ResultAsync<{paymentId: string}, Error>` tells you exactly what to expect. No surprises, no hidden exceptions.
+
+**2. Composable**
+
+Chain operations with `andThen`, handle errors with `orElse`. The flow is a pipeline, not a maze of try/catch blocks.
+
+**3. Errors are data**
+
+You can inspect, log, transform, and recover from errors without special syntax. Want to log validation errors differently from database errors? Easy.
+
+**4. Gradual adoption**
+
+Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece. No need to rewrite your entire codebase at once.
 
 ### Approach 3: The Architect (Effect)
 
@@ -412,7 +434,7 @@ const retrySchedule = Schedule.exponential(Duration.millis(200)).pipe(
   Schedule.recurs(2)
 );
 
-// Pure functions that return Effects - composable building blocks
+// Pure functions that return Effects (composable building blocks)
 const parseInput = (raw: unknown) =>
   Effect.try({
     try: () => CreatePayment.parse(raw),
@@ -530,7 +552,7 @@ const persistFailure = (
     return yield* Effect.fail(new ProviderUnavailable(String(error)));
   });
 
-// Main Effect program - pure composition
+// Main Effect program: pure composition
 export const createPaymentEffect = (raw: unknown, actorEmail: string) =>
   Effect.gen(function* () {
     // Parse input
@@ -563,7 +585,7 @@ export const createPaymentEffect = (raw: unknown, actorEmail: string) =>
     return { paymentId };
   });
 
-// Wiring - dependency injection
+// Wiring: dependency injection
 export const makeAppLayer = (db: Db, provider: Provider) =>
   Layer.merge(
     Layer.effect(DbService, Effect.succeed(db)),
@@ -588,10 +610,21 @@ export const runPayment = async (
 
 **Why this is powerful:**
 
-- Policies are first-class citizens (timeouts, retries, logging)
-- Perfect testability through dependency injection layers
-- Readable despite complexity (Effect.gen makes it look synchronous)
-- Composable across your entire application with consistent patterns
+**1. Policies are first-class citizens**
+
+Timeouts, retries, and logging aren't scattered through your code. They're declared upfront as policies you can see, test, and modify independently.
+
+**2. Perfect testability**
+
+Dependency injection through layers means you can swap real services for test implementations without mocking frameworks or complex setup.
+
+**3. Readable despite complexity**
+
+Effect.gen makes the code look synchronous even though it's handling complex orchestration. The control flow is clear.
+
+**4. Composable everywhere**
+
+Same retry logic across your entire app. Consistent error handling. Want to add tracing? Add it once, get it everywhere.
 
 ## The Mental Models Explained
 
@@ -605,6 +638,14 @@ Think of exceptions as fire alarms. When something goes wrong:
 4. **HANDLE OR PANIC!** Either someone catches it, or the whole program crashes
 
 This works great when failures are truly exceptional. But when failures are common (network timeouts, validation errors, etc.), you're constantly setting off fire alarms for routine events.
+
+**The problem with fire alarms for routine events:**
+
+Every time you throw an exception, you're forcing the runtime to:
+- Unwind the call stack
+- Search for a handler
+- Lose context about where you were
+- Make recovery harder than it needs to be
 
 ### neverthrow: The Railway Model
 
@@ -623,6 +664,10 @@ validateInput(data) // Might switch to error track
   .orElse(handleError); // Handles error track
 ```
 
+**Why this works better for business logic:**
+
+The railway model makes failure a first-class concept. You can see the success path and error path clearly. You can handle specific errors at specific points. And you can compose operations without losing error information.
+
 ### Effect: The Blueprint Model
 
 Effect treats your program like architectural blueprints:
@@ -634,27 +679,41 @@ Effect treats your program like architectural blueprints:
 
 This separation lets you test, modify, and reason about each concern independently.
 
+**Why blueprints matter:**
+
+When you separate description from execution, you gain:
+- The ability to test without side effects
+- The ability to modify policies without changing business logic
+- The ability to visualize and reason about your program structure
+- The ability to swap implementations (test vs production) easily
+
 ## Migration Strategies
 
 ### The Three-Phase Evolution
 
 **Phase 1: Foundation (try/catch everywhere)**
 
-- Build basic functionality
-- Identify pain points where errors are hard to handle
-- Keep it simple, ship features
+Start here. Build basic functionality, ship features, identify pain points where errors are hard to handle. Keep it simple until simplicity becomes painful.
+
+**When to move to Phase 2:**
+- You're writing the same error handling patterns repeatedly
+- You're forgetting to catch errors and finding out at runtime
+- Your error handling code is as complex as your business logic
+- You need to compose operations but try/catch makes it painful
 
 **Phase 2: Core Domain (introduce neverthrow)**
 
-- Refactor your most complex business logic to use Result types
-- Keep try/catch at system boundaries (HTTP handlers, etc.)
-- Gradually expand the Result-based code
+Refactor your most complex business logic to use Result types. Keep try/catch at system boundaries (HTTP handlers, event listeners, etc.). Gradually expand the Result-based code.
+
+**When to move to Phase 3:**
+- You need consistent policies (timeouts, retries) across your app
+- You're implementing the same infrastructure patterns repeatedly
+- Testing requires complex mocking and setup
+- Your team is comfortable with functional programming concepts
 
 **Phase 3: Policies (consider Effect)**
 
-- Only when you have complex orchestration needs
-- When consistent policies become important across your app
-- When your team is ready for the investment
+Only when you have complex orchestration needs. When consistent policies become important across your app. When your team is ready for the investment.
 
 ### Practical Migration Tactics
 
@@ -680,6 +739,10 @@ const result = createUserSafe(userData)
   .andThen((user) => validateUser(user))
   .andThen((user) => sendWelcomeEmail(user));
 ```
+
+**Why this works:**
+
+You get the benefits of Result types in new code without rewriting everything. You can migrate incrementally, testing each piece as you go.
 
 #### 2. The Boundary Strategy
 
@@ -708,6 +771,10 @@ export async function POST_createPayment(req: Request, res: Response) {
 }
 ```
 
+**Why boundaries matter:**
+
+System boundaries (HTTP, events, database connections) need to handle unexpected errors. try/catch is fine here. But inside your application, Result types give you better control.
+
 #### 3. The Interoperability Patterns
 
 ```typescript
@@ -729,6 +796,10 @@ function wrapLegacyFunction(data: unknown): ResultAsync<User, Error> {
   );
 }
 ```
+
+**When to convert between paradigms:**
+
+Convert to exceptions at system boundaries where the caller expects exceptions. Convert to Results when you enter your business logic where you want explicit error handling.
 
 ## Testing Strategies
 
@@ -768,11 +839,19 @@ describe('try/catch payment processing', () => {
 });
 ```
 
-**Problems:**
+**Problems with this approach:**
 
-- Different test patterns for success vs failure
-- Hard to test partial failures or recovery logic
-- Exception inspection is cumbersome
+**1. Different test patterns for success vs failure**
+
+Success cases return values. Failure cases throw exceptions. Your test setup changes based on what you're testing.
+
+**2. Hard to test partial failures or recovery logic**
+
+When you need to test "what happens after step 3 fails but step 4 succeeds", you're setting up complex mocking scenarios.
+
+**3. Exception inspection is cumbersome**
+
+You can't easily check error details or multiple error conditions without nested try/catch blocks or special matchers.
 
 ### Testing neverthrow: Uniform Structure
 
@@ -817,11 +896,19 @@ describe('neverthrow payment processing', () => {
 });
 ```
 
-**Benefits:**
+**Benefits of this approach:**
 
-- Uniform test structure for all outcomes
-- Easy to inspect error details
-- Simple to test complex failure scenarios
+**1. Uniform test structure for all outcomes**
+
+Every test follows the same pattern: call the function, check if it's Ok or Err, inspect the value or error.
+
+**2. Easy to inspect error details**
+
+Errors are values. You can check properties, compare values, and test multiple error conditions without special syntax.
+
+**3. Simple to test complex failure scenarios**
+
+Want to test cascading failures? Just check the Result chain. Want to test recovery? Check that the error track switches back to success.
 
 ### Testing Effect: Maximum Control
 
@@ -864,32 +951,59 @@ describe('Effect payment processing', () => {
 });
 ```
 
-**Benefits:**
+**Benefits of this approach:**
 
-- Complete dependency injection through layers
-- Test policies (timeout, retry) in isolation
-- Pure test implementations without mocking
-- Predictable test execution without side effects
+**1. Complete dependency injection through layers**
+
+No mocking frameworks needed. You provide test implementations directly through layers.
+
+**2. Test policies (timeout, retry) in isolation**
+
+Want to test that your retry logic works? Create a provider that fails twice then succeeds, and verify the effect retries correctly.
+
+**3. Pure test implementations without mocking**
+
+Your test implementations are just objects. No magic, no setup, no teardown.
+
+**4. Predictable test execution without side effects**
+
+Effects are descriptions of work, not the work itself. You can inspect, modify, and test them without running side effects.
 
 ## Performance Considerations
 
 ### Bundle Size Impact
 
+The first question everyone asks: how much does this cost?
+
 - **try/catch**: Zero additional bundle size (native JavaScript)
 - **neverthrow**: Small footprint (~3-5KB minified + gzipped), tree-shakeable
-- **Effect**: Larger runtime system (~50KB+)
+- **Effect**: Larger runtime system (~50KB+ minified + gzipped)
+
+**When bundle size matters:**
+
+If you're building for mobile, edge functions, or environments where every kilobyte counts, try/catch's zero overhead is compelling. neverthrow adds minimal cost. Effect requires justification.
 
 ### Runtime Characteristics
 
-**Exceptions are expensive:** When try/catch actually catches exceptions, it's much slower than normal execution. The exact performance depends on:
+**Exceptions are expensive**
+
+When try/catch actually catches exceptions, it's much slower than normal execution. The exact performance depends on:
 
 - How deep the call stack is
 - Whether the exception is caught locally or bubbles up
-- The JavaScript engine's optimization
+- The JavaScript engine's optimization (V8, SpiderMonkey, etc.)
 
-**Result types have consistent performance:** Success and error paths perform similarly, making performance more predictable.
+**But here's the key: exceptions are only expensive when thrown**
 
-**Effect has overhead:** The runtime system adds consistent overhead but provides more features and better composability.
+If your error rate is truly low (<0.1%), the performance impact is negligible. But if errors are common (validation failures, expected business logic paths), exceptions become costly.
+
+**Result types have consistent performance**
+
+Success and error paths perform similarly, making performance more predictable. Whether you return `ok(value)` or `err(error)`, the cost is roughly the same.
+
+**Effect has overhead**
+
+The runtime system adds consistent overhead but provides more features and better composability. The overhead is usually small compared to actual I/O operations (database, network), but it's there.
 
 ### When Performance Matters
 
@@ -898,18 +1012,21 @@ describe('Effect payment processing', () => {
 - Bundle size is critical (mobile, edge functions)
 - Happy path performance is paramount
 - Error rates are genuinely low (<0.1%)
+- You're at system boundaries where exceptions are expected
 
 **Choose neverthrow when:**
 
 - You need predictable performance
-- Error rates are moderate (0.1% - 10%)
-- Bundle size is a reasonable concern
+- Error rates are moderate (0.1% to 10%)
+- Bundle size is a reasonable concern but not critical
+- You want composability without runtime overhead
 
 **Choose Effect when:**
 
 - Complex orchestration outweighs performance cost
-- Consistent performance more important than peak performance
+- Consistent performance is more important than peak performance
 - Bundle size is not a constraint
+- You need sophisticated features (retries, timeouts, dependency injection)
 
 ## Error Recovery Patterns
 
@@ -940,6 +1057,19 @@ class CircuitBreaker {
     } catch (error) {
       this.recordFailure();
       throw error;
+    }
+  }
+
+  private reset() {
+    this.failures = 0;
+    this.state = 'CLOSED';
+  }
+
+  private recordFailure() {
+    this.failures++;
+    this.lastFailure = Date.now();
+    if (this.failures >= 5) {
+      this.state = 'OPEN';
     }
   }
 }
@@ -988,7 +1118,13 @@ const circuitBreakerEffect = <T, E>(
   effect.pipe(Effect.circuitBreaker(config.maxFailures, config.resetTimeout));
 ```
 
+**Why circuit breakers matter:**
+
+When a service is failing, continuing to call it wastes resources and increases latency. Circuit breakers fail fast, giving the service time to recover.
+
 ### Fallback Strategies
+
+When your primary data source fails, try alternatives before giving up:
 
 ```typescript
 // neverthrow: Chainable fallbacks
@@ -1032,9 +1168,13 @@ const getDataWithFallbackEffect = (id: string) =>
   );
 ```
 
+**Why fallbacks matter:**
+
+Systems fail. Having multiple data sources increases reliability. The key is making fallback logic explicit and composable.
+
 ### Compensation Patterns (Sagas)
 
-When multi-step operations fail partway through:
+When multi-step operations fail partway through, you need to undo what you've done:
 
 ```typescript
 // neverthrow: Structured compensation
@@ -1079,55 +1219,90 @@ const processOrderWithSTM = (order: Order) =>
   });
 ```
 
+**Why compensation patterns matter:**
+
+Distributed transactions are hard. When you can't rely on database transactions, you need explicit compensation logic to maintain consistency.
+
 ## Production Battle Stories
 
 ### Story 1: The Payment Processor That Learned to Fail Gracefully
 
-**The Problem:** A payment processor was using try/catch everywhere. When their primary payment provider had an outage, the entire service went down because exceptions were bubbling up and crashing request handlers.
+**The Problem**
 
-**The Solution:** They migrated their core payment logic to neverthrow, allowing them to:
+A payment processor was using try/catch everywhere. When their primary payment provider had an outage, the entire service went down because exceptions were bubbling up and crashing request handlers.
+
+**The Solution**
+
+They migrated their core payment logic to neverthrow, allowing them to:
 
 - Implement fallback payment providers
 - Gracefully degrade to "payment pending" mode
 - Log detailed error information without crashing
 
-**The Result:** 99.9% uptime even when individual providers failed.
+**The Result**
+
+99.9% uptime even when individual providers failed. Customer support calls dropped by 80% during provider outages.
 
 ### Story 2: The Microservice That Couldn't Scale
 
-**The Problem:** A microservice was handling increasing load but error handling was scattered across try/catch blocks. When they needed to add timeouts, retries, and circuit breakers, the code became unmaintainable.
+**The Problem**
 
-**The Solution:** They adopted Effect, which allowed them to:
+A microservice was handling increasing load but error handling was scattered across try/catch blocks. When they needed to add timeouts, retries, and circuit breakers, the code became unmaintainable.
+
+**The Solution**
+
+They adopted Effect, which allowed them to:
 
 - Declare retry and timeout policies once and reuse them
 - Test complex failure scenarios easily
 - Add observability without changing business logic
 
-**The Result:** Reduced incident response time from hours to minutes, and new features could be added without fear of breaking error handling.
+**The Result**
+
+Reduced incident response time from hours to minutes. New features could be added without fear of breaking error handling. The team reported that debugging became significantly easier.
 
 ### Story 3: The Legacy Migration That Didn't Break Everything
 
-**The Problem:** A large e-commerce platform wanted to improve error handling but couldn't afford to rewrite their entire system.
+**The Problem**
 
-**The Solution:** They used the boundary strategy:
+A large e-commerce platform wanted to improve error handling but couldn't afford to rewrite their entire system. They had millions of lines of code using try/catch.
+
+**The Solution**
+
+They used the boundary strategy:
 
 - Kept try/catch at HTTP handlers and database layers
 - Gradually converted core business logic to neverthrow
 - Used wrapper functions to bridge between paradigms
 
-**The Result:** Improved error handling without any customer-facing downtime.
+**The Result**
+
+Improved error handling without any customer-facing downtime. The migration took 6 months but was done incrementally, feature by feature.
 
 ## The Final Word
 
-Error handling isn't about choosing the "best" approach, it's about choosing the right tool for your specific context. Consider:
+Error handling isn't about choosing the "best" approach: it's about choosing the right tool for your specific context. Consider:
 
-- **Team expertise**: How comfortable is your team with functional programming?
-- **System complexity**: How many failure modes do you need to handle?
-- **Performance requirements**: Are milliseconds critical, or is reliability more important?
-- **Migration constraints**: Are you working with legacy code or starting fresh?
+**Team expertise**
+
+How comfortable is your team with functional programming? If everyone knows JavaScript but nobody knows functional patterns, neverthrow will require training. Effect even more so.
+
+**System complexity**
+
+How many failure modes do you need to handle? Simple CRUD apps might be fine with try/catch. Complex distributed systems benefit from Effect's sophisticated tooling.
+
+**Performance requirements**
+
+Are milliseconds critical, or is reliability more important? High-frequency trading systems care about nanoseconds. Most web apps care about correctness first.
+
+**Migration constraints**
+
+Are you working with legacy code or starting fresh? Greenfield projects have more flexibility. Legacy systems need gradual migration strategies.
 
 Start simple, evolve gradually, and always remember: the best error handling strategy is the one that helps you sleep better at night.
 
----
+When your pager goes off at 3 AM because payments are down, you'll thank yourself for thinking this through.
 
-_For more examples and working code, check out the [src/](./src/) directory._
+***
+
+For more examples and working code, check out the [src/](./src/) directory.
