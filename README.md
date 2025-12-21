@@ -1,4 +1,4 @@
-# Against Railway-Oriented Programming: Three Ways to Handle the Inevitable
+# Beyond Railway-Oriented Programming: Four Practical Error-Handling Styles
 
 **Or: How I learned to stop worrying and embrace failure**
 
@@ -14,40 +14,49 @@ But what if we treated errors as first-class citizens? What if failure was just 
 
 Let's say you're building a payment system. Not a toy one: a real one that handles actual money and can't afford to lose a penny or charge someone twice.
 
-Here's what needs to happen:
+Each step in this system fails in its own special way. To handle them properly, we first need to classify them:
 
-1. **Validate input** - Because users will send you `{amount: "banana"}`
-2. **Check for duplicates** - Because mobile apps retry everything 47 times
-3. **Acquire a lock** - Because concurrent requests exist
-4. **Call the provider** - Who might be having a bad day
-5. **Persist everything** - With audit trails, because lawyers
+1.  **Domain Errors** (e.g., `ValidationError`): Invalid user input like `{amount: "banana"}`. These are expected and should be handled with clear feedback.
+2.  **Concurrency Errors** (e.g., `IdempotencyConflict`): Mobile apps retrying 47 times and hitting race conditions. Requires locking or deduplication.
+3.  **Dependency Errors** (e.g., `ProviderUnavailable`, `Timeout`): The external payment provider having a bad day. Usually requires retries or failover.
+4.  **Infrastructure Errors** (e.g., `PersistError`, `DatabaseError`): Your own database failing. Often requires paging an engineer.
+5.  **Unexpected Errors** (e.g., Bugs): The `undefined is not a function` special.
 
-Each of these steps fails in its own special way. Validation fails fast with clear messages. The database might be slow but usually works. The payment provider might timeout, return weird HTTP codes, or just say "nope" for reasons known only to them.
+This is where our four approaches start to diverge. What you're really choosing isn't just a library; you're choosing whether your error handling is exception-based, explicit Result-based, or Result-based with orchestration and policies on top.
 
-This is where our three approaches start to diverge.
+(In practice, some errors overlap categories—for example, a provider 4xx is a dependency error, but it's often treated as a domain-level "hard fail" in business logic.)
+
+**The Goal: Three Criteria for Great Error Handling**
+
+Whatever approach you choose, evaluate it against these three benchmarks:
+1.  **Visible**: Can you see all the ways your code can fail just by looking at it?
+2.  **Composable**: Do errors make it painful to combine functions together?
+3.  **Honest**: Do your function signatures tell the truth about what might happen?
+
+The trade-off is almost always local ergonomics vs consistency and visibility across the codebase.
 
 ```mermaid
 graph TD
     A[Raw Payment Request] --> B[Validate Input]
     B -->|Valid| C[Check for Existing Payment]
-    B -->|Invalid| X1[ValidationError]
+    B -->|Invalid| X1[Domain: ValidationError]
 
     C -->|Found| D[Return Existing Payment ID]
     C -->|Not Found| E[Acquire Lock]
 
     E -->|Success| F[Call Payment Provider]
-    E -->|Failed| X2[IdempotencyConflict]
+    E -->|Failed| X2[Concurrency: IdempotencyConflict]
 
     F -->|Success| G[Persist Payment]
-    F -->|4xx Error| X3[ProviderHardFail]
+    F -->|4xx Error| X3[Dependency: ProviderRejected 4xx]
     F -->|5xx/Timeout| H[Retry Logic]
 
     H -->|Retry Success| G
     H -->|All Retries Failed| I[Persist Failure Record]
-    I --> X4[ProviderUnavailable]
+    I --> X4[Dependency: ProviderUnavailable]
 
     G -->|Success| J[Return Payment ID]
-    G -->|Failed| X5[PersistError]
+    G -->|Failed| X5[Infrastructure: PersistError]
 
     style X1 fill:#ff9999
     style X2 fill:#ff9999
@@ -58,16 +67,34 @@ graph TD
     style D fill:#99ff99
 ```
 
-## Three Philosophies
+## At a Glance: Practical Comparison
 
-**Three ways to think about failure:**
+All four approaches model the same payment workflow. In the repo, the implementations are exercised by a shared test suite.
+
+| Approach | Error Visibility | Composability | Ergonomics | Ecosystem Weight |
+|----------|-----------------|---------------|------------|------------------|
+| **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Minimal |
+| **Neverthrow** | High | High | High (chains), Medium (async/await) | Light |
+| **Effect** | Very High | Very High | Low → Medium (learning) | Heavy |
+| **Workflow** | High | High | High (async/await) | Light |
+
+**Key Differentiators:**
+
+- **Vanilla**: Simplest to write, but errors hide in function signatures.
+- **Neverthrow**: Best for functional chaining and explicit error types.
+- **Effect**: Most powerful (DI, retries, timeouts) but has a steep learning curve.
+- **Workflow**: Familiar async/await syntax with automatic error inference and caching.
+
+## Four Philosophies
+
+**Four ways to think about failure:**
 
 ```mermaid
 graph LR
     subgraph "Safety Net (try/catch)"
-        A1["🚂 Train runs"]
-        A2["💥 Derails"]
-        A3["🥅 Caught by net"]
+        A1["🤹 Happy path"]
+        A2["💥 Slip"]
+        A3["🥅 Caught (maybe)"]
         A1 --> A2
         A2 --> A3
     end
@@ -87,6 +114,14 @@ graph LR
         C1 --> C2
         C2 --> C3
     end
+
+    subgraph "Orchestrator (Workflow)"
+        D1["🎼 Declare steps"]
+        D2["🎯 Auto-infer errors"]
+        D3["🎬 Execute with step()"]
+        D1 --> D2
+        D2 --> D3
+    end
 ```
 
 ### 🎭 The Optimist (try/catch)
@@ -104,11 +139,24 @@ async function makePayment(data: unknown) {
     await saveToDatabase(result);
     return { success: true };
   } catch (error) {
-    // Panic! Something went wrong!
-    console.error('Uh oh:', error);
-    throw error; // Pass the problem to someone else
+    // In core logic: convert/rethrow. Log at the system boundary to avoid double-logging.
+    throw error;
   }
 }
+```
+
+In real code, "convert" often means mapping unknown exceptions into a typed `InfrastructureError` at the boundary:
+
+```typescript
+app.post('/pay', async (req, res) => {
+  try {
+    const result = await makePayment(req.body);
+    res.json(result);
+  } catch (e) {
+    const err = AppError.fromUnknown(e);
+    res.status(err.httpStatus).json({ error: err.message });
+  }
+});
 ```
 
 **The Mental Model: The Trapeze Artist**
@@ -144,7 +192,7 @@ flowchart TD
 
 **When to use this:**
 
-Use try/catch for simple operations, rapid prototyping, or at system boundaries (HTTP handlers, event listeners) where you need to catch all unexpected errors and return a 500 response.
+Use try/catch for simple operations, rapid prototyping, or at system boundaries (HTTP handlers, event listeners) where you need to catch unexpected errors and return an appropriate HTTP response.
 
 **The limitations:**
 
@@ -241,13 +289,13 @@ Here's the clever bit: once you're on the error track, you stay there until some
 
 **When to use this:**
 
-Use neverthrow when your business logic has multiple failure modes that need different handling, when you need composable error handling, or when you're building systems where reliability matters more than development speed.
+Use neverthrow when your business logic has multiple failure modes that need different handling, when you need composable error handling, or when you want error-handling discipline in core logic.
 
 **Why this works better:**
 
 **Function signatures are honest**
 
-`ResultAsync<{paymentId: string}, Error>` tells you exactly what you're getting: either a payment ID or an error. No surprises, no hidden exceptions. The type system enforces error handling at compile time.
+`Promise<Result<{paymentId: string}, PaymentError>>` tells you exactly what you're getting: either a payment ID or an error. No surprises, no hidden exceptions. The type system makes error handling explicit in the signature.
 
 **Composition is natural**
 
@@ -263,6 +311,8 @@ return parse(raw)
 ```
 
 It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
+
+**Note:** neverthrow feels best when you lean into its chaining style (`ResultAsync` + `.andThen()`). If your team prefers async/await flows, you'll either write more `.isErr()` checks or wrap helpers to keep the happy path clean. Workflow takes the opposite bet: keep async/await and use `step()` for early-exit propagation.
 
 **Errors are data, not control flow**
 
@@ -283,16 +333,17 @@ Welcome to Effect, where you're not a programmer: you're an architect drawing bl
 ```typescript
 import { Effect } from 'effect';
 
+// (Assume validatePayment/chargeCustomer/saveToDatabase return Effect values, not promises.)
+
 const makePayment = (data: unknown) =>
   Effect.gen(function* () {
-    const payment = yield* validatePayment(data); // Might fail with ValidationError
-    const result = yield* chargeCustomer(payment); // Might fail with PaymentError
-    yield* saveToDatabase(result); // Might fail with DatabaseError
+    const payment = yield* validatePayment(data);
+    const result = yield* chargeCustomer(payment);
+    yield* saveToDatabase(result);
     return { success: true };
   }).pipe(
-    Effect.timeout(5000), // Add timeout policy
-    Effect.retry(3), // Add retry policy
-    Effect.withLogSpan('payment') // Add logging
+    Effect.timeout(5000),
+    Effect.withLogSpan('payment')
   );
 ```
 
@@ -359,6 +410,8 @@ Use Effect when you need sophisticated orchestration patterns (retries, timeouts
 Want to retry with exponential backoff? That's not scattered implementation code: that's a policy you declare once and reuse everywhere:
 
 ```typescript
+// (Imports omitted for brevity: Schedule, Layer, etc.)
+
 const retryPolicy = Schedule.exponential(200).pipe(
   Schedule.jittered, // Add randomness to avoid thundering herd
   Schedule.recurs(3) // Maximum 3 retries
@@ -391,6 +444,212 @@ Same retry logic everywhere. Consistent error handling across your entire app. W
 
 ---
 
+### 🎼 The Orchestrator (Workflow)
+
+"Let me write familiar async/await code with the type safety of Result types"
+
+What if you could write code that looks like async/await (familiar to everyone) but with the type safety of Result types? What if your functions were honest about failure, but you didn't have to learn monadic chains or generator syntax?
+
+Welcome to Workflow, where `step()` unwraps Results and exits early on error—automatically.
+
+```typescript
+import { run, ok, err, type AsyncResult } from '@jagreehal/workflow';
+
+const validatePayment = async (data: unknown): AsyncResult<Payment, ValidationError> =>
+  isValid(data) ? ok(parsePayment(data)) : err(new ValidationError('Invalid'));
+
+const chargeCustomer = async (payment: Payment): AsyncResult<ChargeResult, PaymentError> =>
+  ok({ success: true });
+
+const saveToDatabase = async (result: ChargeResult): AsyncResult<void, DatabaseError> =>
+  ok(undefined);
+
+// Clean imperative workflow with run()
+const result = await run(async (step) => {
+  const payment = await step(validatePayment(data)); // Unwraps Result, exits early on error
+  const charge = await step(chargeCustomer(payment)); // Only runs if validation succeeded
+  await step(saveToDatabase(charge));                  // Only runs if charge succeeded
+  return { success: true };
+}, { onError: () => {} });
+
+// result.ok: true → result.value: { success: true }
+// result.ok: false → result.error: ValidationError | PaymentError | DatabaseError
+```
+
+For complex workflows needing caching, resume state, or automatic error inference:
+
+```typescript
+import { createWorkflow } from '@jagreehal/workflow';
+
+// Declare dependencies → error union computed automatically
+const makePayment = createWorkflow({ validatePayment, chargeCustomer, saveToDatabase });
+
+const result = await makePayment(async (step) => {
+  const payment = await step(() => validatePayment(data), { key: 'validate' }); // Cached
+  const charge = await step(() => chargeCustomer(payment), { key: 'charge' });
+  await step(() => saveToDatabase(charge), { key: 'save' });
+  return { success: true };
+});
+
+// result.error: ValidationError | PaymentError | DatabaseError | UnexpectedError
+// ↑ Computed automatically from { validatePayment, chargeCustomer, saveToDatabase }
+```
+
+**Why caching/resume matters (especially for payments):**
+
+The scariest failure mode is "provider charge succeeded, but persistence failed." If you retry the whole workflow naïvely, you risk charging the customer twice. With step keys, you can safely resume without repeating side effects.
+
+```typescript
+const makePayment = createWorkflow({ validatePayment, callProvider, persistSuccess });
+
+const result = await makePayment(async (step) => {
+  const payment = await step(() => validatePayment(data), { key: 'validate' });
+
+  // Never repeat this once it succeeds:
+  const charge = await step(() => callProvider(payment), {
+    key: `charge:${payment.idempotencyKey}`,
+  });
+
+  // If this fails (DB down), you can rerun later and resume here without re-charging:
+  await step(() => persistSuccess(payment, charge), { key: `persist:${charge.id}` });
+
+  return { paymentId: charge.paymentId };
+});
+```
+
+**The Mental Model: The Conductor**
+
+Picture this: You're a conductor leading an orchestra. You don't need to know how each musician plays their instrument. You just need to know what instruments you have available, and you can compose a symphony.
+
+The beautiful thing? The sheet music (your workflow) automatically documents all the ways the performance could go wrong. If the violinist is sick? The error type tells you exactly what happened. If the drummer misses a beat? You know immediately which instrument failed.
+
+```mermaid
+flowchart TD
+    subgraph "Workflow: Step-by-Step Execution"
+        subgraph "Happy Path (step() unwraps Results)"
+            S1["🎬 step(validatePayment)"]
+            S2["🎬 step(checkExisting)"]
+            S3["🎬 step(acquireLock)"]
+            S4["🎬 step(callProvider)"]
+            S5["🎬 step(persistSuccess)"]
+            S6["🎉 Success!"]
+            S1 -->|"ok"| S2
+            S2 -->|"ok"| S3
+            S3 -->|"ok"| S4
+            S4 -->|"ok"| S5
+            S5 -->|"ok"| S6
+        end
+
+        subgraph "Early Exit (automatic on error)"
+            E1["❌ ValidationError"]
+            E2["❌ IdempotencyConflict"]
+            E3["❌ ProviderUnavailable"]
+            E4["❌ PersistError"]
+            EXIT["🛑 Workflow Exits"]
+        end
+
+        S1 -.error.-> E1
+        S2 -.error.-> E2
+        S3 -.error.-> E2
+        S4 -.error.-> E3
+        S5 -.error.-> E4
+        
+        E1 --> EXIT
+        E2 --> EXIT
+        E3 --> EXIT
+        E4 --> EXIT
+    end
+```
+
+```mermaid
+flowchart TD
+    subgraph "Workflow: Dependency-Declared Orchestration"
+        subgraph "1. Declare Dependencies"
+            D1["🎼 validatePayment"]
+            D2["🎼 chargeCustomer"]
+            D3["🎼 saveToDatabase"]
+        end
+
+        subgraph "2. Automatic Inference"
+            I1["🔍 Extract error types"]
+            I2["🔗 Union: ValidationError | PaymentError | DatabaseError"]
+            I3["✅ Type-safe error handling"]
+        end
+
+        subgraph "3. Execute with step()"
+            E1["🎬 step(validatePayment)"]
+            E2["🎬 step(chargeCustomer)"]
+            E3["🎬 step(saveToDatabase)"]
+            E4["✅ Early exit on error"]
+        end
+
+        D1 --> I1
+        D2 --> I1
+        D3 --> I1
+        I1 --> I2 --> I3
+        I3 --> E1 --> E2 --> E3
+        E1 -.error.-> E4
+        E2 -.error.-> E4
+        E3 -.error.-> E4
+    end
+```
+
+**When to use this:**
+
+Use Workflow when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, or when you're building workflows that benefit from step caching and resume state.
+
+**Two APIs for different needs:**
+
+| API | Use Case | Error Types | Features |
+|-----|----------|-------------|----------|
+| `run()` | Simple workflows | Manual or inferred | Lightweight, no deps |
+| `createWorkflow()` | Complex workflows | Auto-inferred from deps | Caching, resume, HITL |
+
+**Why you might want this:**
+
+**Async/await with automatic error propagation**
+
+Write normal async/await code, and `step()` handles early-exit error propagation for you.
+
+```typescript
+const result = await run(async (step) => {
+  const user = await step(fetchUser('1'));
+  const posts = await step(fetchPosts(user.id));
+  return { user, posts };
+}, { onError: () => {} });
+```
+
+**Early exit is automatic**
+
+`step()` unwraps Results. If it's an error, the workflow exits immediately. No need to check `.isErr()` everywhere. The happy path stays clean and readable.
+
+**Handle throwing operations with step.try()**
+
+For operations that might throw (like wrapping existing APIs), use `step.try()` to convert exceptions to typed errors:
+
+```typescript
+const response = await step.try(
+  () => riskyOperation(),
+  { onError: (e) => new CustomError(String(e)) }
+);
+```
+
+**Automatic error inference with createWorkflow**
+
+You declare your functions, and the error union is computed automatically. Add a new function? The error types update automatically. Remove one? TypeScript ensures you handle the new error set.
+
+```typescript
+const workflow = createWorkflow({ fetchUser, fetchPosts, sendEmail });
+// Error type: 'NOT_FOUND' | 'FETCH_ERROR' | 'EMAIL_FAILED' | UnexpectedError
+// ↑ Computed automatically, no manual union management
+```
+
+**Step caching and resume state**
+
+Expensive operations can be cached by key. Workflows can be paused and resumed. Perfect for long-running processes or human-in-the-loop workflows.
+
+---
+
 ## Which One Should I Choose?
 
 Here's the honest truth: **it depends on what you're building**.
@@ -400,7 +659,7 @@ Here's the honest truth: **it depends on what you're building**.
 - You're building something simple with straightforward error handling
 - Your team is learning JavaScript/TypeScript fundamentals
 - You need to ship quickly and iteration speed matters more than compile-time safety
-- You're working at system boundaries (HTTP handlers, event listeners) where you need to catch all errors
+- You're working at system boundaries (HTTP handlers, event listeners) where you need to catch unexpected errors and return an appropriate HTTP response
 
 ### Consider neverthrow when:
 
@@ -416,6 +675,16 @@ Here's the honest truth: **it depends on what you're building**.
 - You want consistent policies applied uniformly across your application
 - Your team has capacity to learn functional programming concepts and advanced abstractions
 
+### Consider Workflow when:
+
+- You want Result types with familiar async/await syntax
+- You want the compiler to verify that you've handled all error cases
+- You're tired of forgetting to catch exceptions and discovering them in production
+- You need automatic error type inference from declared functions
+- You're building workflows that benefit from step caching or resume state
+- You want type-safe error handling without the learning curve of Effect
+- Your team knows async/await but wants better error handling than try/catch
+
 ## The Decision Tree
 
 ```mermaid
@@ -425,51 +694,79 @@ flowchart TD
     Simple -->|Yes| TryCatch[🎭 try/catch]
     Simple -->|No| Complex{Complex business logic?}
 
-    Complex -->|Yes| NeedsPolicies{Need timeouts, retries, etc?}
+    Complex -->|Yes| WantAutoInference{Want auto error inference?}
     Complex -->|No| Neverthrow[🚂 neverthrow]
+
+    WantAutoInference -->|Yes| FamiliarSyntax{Want async/await syntax?}
+    WantAutoInference -->|No| NeedsPolicies{Need timeouts, retries, etc?}
+
+    FamiliarSyntax -->|Yes| Workflow[🎼 Workflow]
+    FamiliarSyntax -->|No| Neverthrow
 
     NeedsPolicies -->|Yes| TeamReady{Team ready for learning?}
     NeedsPolicies -->|No| Neverthrow
 
     TeamReady -->|Yes| Effect[🏗️ Effect]
-    TeamReady -->|No| Neverthrow
+    TeamReady -->|No| Workflow
 
     TryCatch --> TryCatchGood[✅ Perfect for simple cases<br/>✅ Everyone knows it<br/>❌ Gets messy with complexity]
 
     Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Learning curve for team]
 
+    Workflow --> WorkflowGood[✅ Familiar async/await<br/>✅ Early-exit Result propagation<br/>✅ Optional inference + caching]
+
     Effect --> EffectGood[✅ Powerful policies<br/>✅ Excellent testability<br/>❌ Steep learning curve]
 
     style TryCatch fill:#FFE4B5
     style Neverthrow fill:#E0E0E0
+    style Workflow fill:#E8F5E9
     style Effect fill:#E6E6FA
 ```
+
+**In practice, most systems mix styles:** try/catch at boundaries, explicit Results in core workflows, and policy-driven orchestration only where it pays off. Don't force a single hammer.
 
 ## A Simple Example: Division
 
 Let's see how each approach handles a simple division function:
 
 ```typescript
-// try/catch approach
-function divide(a: number, b: number): number {
-  if (b === 0) {
-    throw new Error('Division by zero');
-  }
+// throwing approach (caught at the boundary)
+function divideThrow(a: number, b: number): number {
+  if (b === 0) throw new Error('Division by zero');
   return a / b;
 }
+```
 
+```typescript
 // neverthrow approach
-import { Result, ok, err } from 'neverthrow';
+import { Result as NtResult, ok as ntOk, err as ntErr } from 'neverthrow';
 
-function divide(a: number, b: number): Result<number, Error> {
-  return b === 0 ? err(new Error('Division by zero')) : ok(a / b);
+function divideNeverthrow(a: number, b: number): NtResult<number, Error> {
+  return b === 0 ? ntErr(new Error('Division by zero')) : ntOk(a / b);
 }
+```
 
+```typescript
 // Effect approach
 import { Effect } from 'effect';
 
-const divide = (a: number, b: number) =>
+const divideEffect = (a: number, b: number) =>
   b === 0 ? Effect.fail(new Error('Division by zero')) : Effect.succeed(a / b);
+```
+
+```typescript
+// Workflow approach
+import { run, ok, err, type Result } from '@jagreehal/workflow';
+
+const divideWorkflow = (a: number, b: number): Result<number, Error> =>
+  b === 0 ? err(new Error('Division by zero')) : ok(a / b);
+
+const result = await run(async (step) => {
+  const x = await step(divideWorkflow(10, 2)); // 5
+  return x;
+});
+
+// result.ok ? result.value : result.error
 ```
 
 Notice how the function signatures tell different stories:
@@ -477,11 +774,12 @@ Notice how the function signatures tell different stories:
 - try/catch: `number` (lies about potential failure)
 - neverthrow: `Result<number, Error>` (honest about what can happen)
 - Effect: `Effect<number, Error, never>` (describes a computation that might fail)
+- Workflow: `Result<number, Error>` (honest types, composed with `step()`)
 
 ## Want to Learn More?
 
 - 📖 **[ADVANCED.md](./ADVANCED.md)** - Deep dive into implementation details, migration strategies, and performance considerations
-- 💻 **[src/](./src/)** - Complete working examples of all three approaches
+- 💻 **[src/](./src/)** - Complete working examples of all four approaches
 - 🧪 **Run the examples** - `npm install && npm test` to see them in action
 
 ## The Uncomfortable Truth
@@ -490,13 +788,10 @@ Here's what I've learned after years of building systems that break in creative 
 
 **Errors aren't bugs: they're features.** The difference between a junior developer and a senior developer isn't that the senior writes bug-free code. It's that the senior developer has learned to design around the inevitable failure.
 
-**The question isn't whether to handle errors.** The question is: how do you make error handling:
+You already have a rubric now: **Visible, Composable, Honest**.  
+Pick the trade-off you're willing to live with — because at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
 
-1. **Visible** - Can you see all the ways your code can fail just by looking at it?
-2. **Composable** - Do errors make it painful to combine functions?
-3. **Honest** - Do your function signatures tell the truth about what might happen?
-
-**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Effect when you need the full architectural toolkit.
+**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Workflow when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
 
 But whatever you choose, choose deliberately. Don't just throw try/catch around everything and hope for the best. And don't pick Effect just because it sounds impressive on your resume.
 
