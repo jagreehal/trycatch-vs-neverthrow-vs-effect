@@ -1,6 +1,6 @@
 # API Feature Comparison
 
-This document provides a direct, pattern-by-pattern comparison of **Neverthrow**, **Effect**, and **awaitly** based on the test suite in `api-comparison.test.ts`.
+This document provides a direct, pattern-by-pattern comparison of **Neverthrow**, **Effect**, and **Awaitly** based on the test suite in `api-comparison.test.ts`.
 
 It highlights how each library handles common tasks like result construction, chaining, error inference, and parallelism.
 
@@ -57,7 +57,7 @@ Effect.gen(function* () {
 });
 ```
 
-### awaitly (Async/Await)
+### Awaitly (Async/Await)
 Uses standard `async/await` with a `step()` wrapper. The `step` function automatically handles early exits on error.
 ```typescript
 import { createWorkflow } from 'awaitly/workflow';
@@ -74,7 +74,7 @@ const result = await loadUserData(async (step, deps) => {
 **DX Verdict:**
 - **Neverthrow:** Clean for 1-2 steps. Harder for 3+.
 - **Effect:** Excellent, flat syntax. Requires understanding generators.
-- **awaitly:** Most familiar for JS/TS devs (just async/await).
+- **Awaitly:** Most familiar for JS/TS devs (just async/await).
 
 ---
 
@@ -113,7 +113,7 @@ const myWorkflow = createWorkflow({ fetchUser, fetchPosts });
 // TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR'
 ```
 
-**DX Verdict:** awaitly's automatic inference reduces boilerplate significantly.
+**DX Verdict:** Awaitly's automatic inference reduces boilerplate significantly.
 
 ---
 
@@ -240,7 +240,7 @@ const user = match(userResult, {
 
 ## Summary
 
-| Feature | Neverthrow | Effect | awaitly |
+| Feature | Neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
 | **Paradigm** | Functional (Chaining) | Functional (Blueprint) | Imperative (Async/Await) |
 | **Syntax** | `.andThen().map()` | `yield* Effect...` | `await step(...)` |
@@ -251,4 +251,4 @@ const user = match(userResult, {
 **Choose based on:**
 - **Neverthrow:** If you love functional chains and want a lightweight library.
 - **Effect:** If you need a complete runtime system (retries, logging, context) and are willing to learn.
-- **awaitly:** If you want the safety of Results but the syntax of async/await, plus automatic error inference.
+- **Awaitly:** If you want the safety of Results but the syntax of async/await, plus automatic error inference.

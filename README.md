@@ -76,14 +76,14 @@ All four approaches model the same payment workflow. In the repo, the implementa
 | **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Minimal |
 | **Neverthrow** | High | High | High (chains), Medium (async/await) | Light |
 | **Effect** | Very High | Very High | Low → Medium (learning) | Heavy |
-| **awaitly** | High | High | High (async/await) | Light |
+| **Awaitly** | High | High | High (async/await) | Light |
 
 **Key Differentiators:**
 
 - **Vanilla**: Simplest to write, but errors hide in function signatures.
 - **Neverthrow**: Best for functional chaining and explicit error types.
-- **Effect**: Most powerful (DI, retries, timeouts) but has a steep learning curve.
-- **awaitly**: Familiar async/await syntax with automatic error inference and caching.
+- **Effect**: Most powerful ecosystem (DI, layers, scheduling, tracing) but has a steep learning curve.
+- **Awaitly**: Familiar async/await syntax with error inference, retries, timeouts, and caching.
 
 ## Four Philosophies
 
@@ -220,7 +220,7 @@ Don't get me wrong: this approach works great at system boundaries. HTTP control
 
 "Half of everything breaks, so let's plan for that from the start"
 
-Here's a radical idea: what if failure wasn't a surprise? What if your functions were honest about what could go wrong, and the compiler actually helped you handle it?
+What if failure wasn't a surprise? What if your functions were honest about what could go wrong, and the compiler actually helped you handle it?
 
 This is the world of Railway-Oriented Programming. Instead of pretending everything will work and then panicking when it doesn't, we build two tracks from the start: the success track and the failure track.
 
@@ -285,7 +285,7 @@ flowchart LR
     end
 ```
 
-Here's the clever bit: once you're on the error track, you stay there until someone explicitly handles it. No more surprises. No more "oh wait, this could actually throw an exception."
+The key idea: once you're on the error track, you stay there until someone explicitly handles it. No more surprises. No more "oh wait, this could actually throw an exception."
 
 **When to use this:**
 
@@ -299,8 +299,6 @@ Use neverthrow when your business logic has multiple failure modes that need dif
 
 **Composition is natural**
 
-Look at this beauty:
-
 ```typescript
 return parse(raw)
   .andThen((input) => checkExisting(db, input))
@@ -312,7 +310,7 @@ return parse(raw)
 
 It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
 
-**Note:** neverthrow feels best when you lean into its chaining style (`ResultAsync` + `.andThen()`). If your team prefers async/await flows, you'll either write more `.isErr()` checks or wrap helpers to keep the happy path clean. awaitly takes the opposite bet: keep async/await and use `step()` for early-exit propagation.
+**Note:** These advantages (honest signatures, natural composition, errors as data) apply equally to Awaitly—both libraries implement railway-oriented programming with Result types. The difference is syntax: neverthrow uses method chaining (`.andThen()`), while Awaitly uses `step()` with async/await. If your team prefers async/await flows, Awaitly lets you keep that syntax while still getting early-exit error propagation.
 
 **Errors are data, not control flow**
 
@@ -324,7 +322,7 @@ Instead of exceptions flying around, you have error values you can inspect, tran
 
 "Let's describe exactly what should happen, then let the system figure it out"
 
-Here's where things get interesting. What if you didn't write code to do things, but instead wrote code to describe what should be done?
+What if you didn't write code to do things, but instead wrote code to describe what should be done?
 
 What if timeouts, retries, logging, and dependency injection weren't scattered throughout your code like confetti, but were declared upfront as policies?
 
@@ -357,7 +355,7 @@ Picture this: You're designing a factory, but you don't actually build anything.
 - How all the pieces fit together (composition)
 - What should be logged and when (observability)
 
-The beautiful thing? You can test the blueprint without building the factory. You can swap out machine specifications without changing the blueprint. You can simulate failures and see how the system responds.
+The upside: you can test the blueprint without building the factory. You can swap out machine specifications without changing the blueprint. You can simulate failures and see how the system responds.
 
 ```mermaid
 flowchart TD
@@ -438,19 +436,19 @@ const testLayer = Layer.merge(DbService.test, ProviderService.mock);
 await Effect.runPromise(program.pipe(Effect.provide(testLayer)));
 ```
 
-**Everything composes beautifully**
+**Everything composes consistently**
 
 Same retry logic everywhere. Consistent error handling across your entire app. Want to add tracing? Add it once, get it everywhere.
 
 ---
 
-### 🎼 The Orchestrator (awaitly)
+### 🎼 The Orchestrator (Awaitly)
 
 "Let me write familiar async/await code with the type safety of Result types"
 
 What if you could write code that looks like async/await (familiar to everyone) but with the type safety of Result types? What if your functions were honest about failure, but you didn't have to learn monadic chains or generator syntax?
 
-Welcome to awaitly, where `step()` unwraps Results and exits early on error—automatically.
+Welcome to Awaitly, where `step()` unwraps Results and exits early on error—automatically.
 
 ```typescript
 import { run, ok, err, type AsyncResult } from 'awaitly';
@@ -521,11 +519,11 @@ const result = await makePayment(async (step, deps) => {
 
 Picture this: You're a conductor leading an orchestra. You don't need to know how each musician plays their instrument. You just need to know what instruments you have available, and you can compose a symphony.
 
-The beautiful thing? The sheet music (your workflow) automatically documents all the ways the performance could go wrong. If the violinist is sick? The error type tells you exactly what happened. If the drummer misses a beat? You know immediately which instrument failed.
+The key benefit: the sheet music (your workflow) automatically documents all the ways the performance could go wrong. If the violinist is sick? The error type tells you exactly what happened. If the drummer misses a beat? You know immediately which instrument failed.
 
 ```mermaid
 flowchart TD
-    subgraph "awaitly: Step-by-Step Execution"
+    subgraph "Awaitly: Step-by-Step Execution"
         subgraph "Happy Path (step() unwraps Results)"
             S1["🎬 step(validatePayment)"]
             S2["🎬 step(checkExisting)"]
@@ -563,7 +561,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph "awaitly: Dependency-Declared Orchestration"
+    subgraph "Awaitly: Dependency-Declared Orchestration"
         subgraph "1. Declare Dependencies"
             D1["🎼 validatePayment"]
             D2["🎼 chargeCustomer"]
@@ -596,7 +594,7 @@ flowchart TD
 
 **When to use this:**
 
-Use awaitly when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, or when you're building workflows that benefit from step caching and resume state.
+Use Awaitly when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, when you need retries and timeouts without the complexity of Effect, or when you're building workflows that benefit from step caching and resume state.
 
 **Two APIs for different needs:**
 
@@ -648,6 +646,32 @@ const workflow = createWorkflow({ fetchUser, fetchPosts, sendEmail });
 
 Expensive operations can be cached by key. Workflows can be paused and resumed. Perfect for long-running processes or human-in-the-loop workflows.
 
+**Retries and timeouts built-in**
+
+Awaitly includes production-ready scheduling without needing a separate library:
+
+```typescript
+// Retry with exponential backoff
+const user = await step.retry(
+  () => fetchUser(id),
+  { attempts: 3, backoff: 'exponential', initialDelay: 100, jitter: true }
+);
+
+// Timeout with AbortSignal support
+const data = await step.withTimeout(
+  (signal) => fetch(url, { signal }),
+  { ms: 5000, signal: true }
+);
+```
+
+Pre-built policies are available for common patterns:
+
+```typescript
+import { retryPolicies, timeoutPolicies } from 'awaitly/policies';
+
+const user = await step.retry(() => fetchUser(id), retryPolicies.transient);
+```
+
 ---
 
 ## Which One Should I Choose?
@@ -670,17 +694,18 @@ Here's the honest truth: **it depends on what you're building**.
 
 ### Look at Effect when:
 
-- You need sophisticated orchestration (timeouts, retries, circuit breakers, rate limiting)
-- Testability is critical and you want pure dependency injection
-- You want consistent policies applied uniformly across your application
+- You need the full ecosystem (dependency injection, layers, structured concurrency, tracing)
+- Testability is critical and you want pure dependency injection with swappable services
+- You want consistent policies applied uniformly via layers across your entire application
 - Your team has capacity to learn functional programming concepts and advanced abstractions
 
-### Consider awaitly when:
+### Consider Awaitly when:
 
 - You want Result types with familiar async/await syntax
 - You want the compiler to verify that you've handled all error cases
 - You're tired of forgetting to catch exceptions and discovering them in production
 - You need automatic error type inference from declared functions
+- You need retries, timeouts, and backoff without adopting Effect's ecosystem
 - You're building workflows that benefit from step caching or resume state
 - You want type-safe error handling without the learning curve of Effect
 - Your team knows async/await but wants better error handling than try/catch
@@ -700,7 +725,7 @@ flowchart TD
     WantAutoInference -->|Yes| FamiliarSyntax{Want async/await syntax?}
     WantAutoInference -->|No| NeedsPolicies{Need timeouts, retries, etc?}
 
-    FamiliarSyntax -->|Yes| awaitly[🎼 awaitly]
+    FamiliarSyntax -->|Yes| awaitly[🎼 Awaitly]
     FamiliarSyntax -->|No| Neverthrow
 
     NeedsPolicies -->|Yes| TeamReady{Team ready for learning?}
@@ -713,7 +738,7 @@ flowchart TD
 
     Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Learning curve for team]
 
-    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Early-exit Result propagation<br/>✅ Optional inference + caching]
+    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Retries, timeouts built-in<br/>✅ Inference, caching, resume]
 
     Effect --> EffectGood[✅ Powerful policies<br/>✅ Excellent testability<br/>❌ Steep learning curve]
 
@@ -755,7 +780,7 @@ const divideEffect = (a: number, b: number) =>
 ```
 
 ```typescript
-// awaitly approach
+// Awaitly approach
 import { run, ok, err, type Result } from 'awaitly';
 
 const divideWorkflow = (a: number, b: number): Result<number, Error> =>
@@ -774,7 +799,7 @@ Notice how the function signatures tell different stories:
 - try/catch: `number` (lies about potential failure)
 - neverthrow: `Result<number, Error>` (honest about what can happen)
 - Effect: `Effect<number, Error, never>` (describes a computation that might fail)
-- awaitly: `Result<number, Error>` (honest types, composed with `step()`)
+- Awaitly: `Result<number, Error>` (honest types, composed with `step()`)
 
 ## Want to Learn More?
 
@@ -791,7 +816,7 @@ Here's what I've learned after years of building systems that break in creative 
 You already have a rubric now: **Visible, Composable, Honest**.  
 Pick the trade-off you're willing to live with — because at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
 
-**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use awaitly when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
+**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Awaitly when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
 
 But whatever you choose, choose deliberately. Don't just throw try/catch around everything and hope for the best. And don't pick Effect just because it sounds impressive on your resume.
 

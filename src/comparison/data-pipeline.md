@@ -7,10 +7,10 @@ See the code: `data-pipeline.test.ts`
 
 ## The Approaches
 
-### 1. The awaitly Approach
+### 1. The Awaitly Approach
 *High readability, built-in caching and resume.*
 
-awaitly excels here because caching and resume state are first-class features. You don't need to wrap your logic in external helper functions; you just configure the step with a `key`.
+Awaitly excels here because caching and resume state are first-class features. You don't need to wrap your logic in external helper functions; you just configure the step with a `key`.
 
 ```typescript
 // Built-in caching and resume
@@ -73,7 +73,7 @@ Effect is designed for this. It treats retries, timeouts, and concurrency limits
 
 ## Comparison Table
 
-| Feature | awaitly | Neverthrow | Effect |
+| Feature | Awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
 | **Caching** | Built-in (`key` param) | Manual implementation | Via Request Cache service / manual wiring |
 | **Resume State** | Built-in (`resumeState`) | Manual implementation | Manual implementation |
@@ -86,5 +86,5 @@ Effect is designed for this. It treats retries, timeouts, and concurrency limits
 
 For **Data Pipelines**:
 - **Effect** is the most robust choice if you need complex policies (circuit breakers, rate limiting, retries) and are willing to wire the runtime services you need.
-- **awaitly** is the pragmatic choice. It gives you caching, resume state, and observability with zero boilerplate and familiar syntax.
+- **Awaitly** is the pragmatic choice. It gives you caching, resume state, and observability with zero boilerplate and familiar syntax.
 - **Neverthrow** struggles here without extra utility libraries for caching and resume functionality.

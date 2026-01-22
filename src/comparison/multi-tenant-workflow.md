@@ -7,10 +7,10 @@ See the code: `multi-tenant-workflow.test.ts`
 
 ## The Approaches
 
-### 1. The awaitly Approach
+### 1. The Awaitly Approach
 *Just JavaScript.*
 
-Since awaitly uses standard `async/await`, you can use standard JavaScript control flow statements like `if`, `else`, and `switch`.
+Since Awaitly uses standard `async/await`, you can use standard JavaScript control flow statements like `if`, `else`, and `switch`.
 
 ```typescript
 // It's just standard code!
@@ -84,7 +84,7 @@ return fetchTenant(id).andThen(tenant => {
 - **Type Mismatches:** All branches must return compatible `Result` types, which can be annoying to align manually.
 
 ### 3. The Effect Approach
-*Generators save the day.*
+*Generators enable imperative control flow.*
 
 Like Workflow, Effect uses generators (`yield*`), which allows using standard `if/switch` statements.
 
@@ -105,7 +105,7 @@ Effect.gen(function* () {
 
 ## Comparison Table
 
-| Feature | awaitly | Neverthrow | Effect |
+| Feature | Awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
 | **Control Flow** | Native (`if`/`switch`) | Functional (`match` / conditionals inside `map`) | Native (`if`/`switch` in gen) |
 | **Branch Typing** | Automatic Union | Manual Alignment | Automatic Union |
@@ -114,5 +114,5 @@ Effect.gen(function* () {
 ## Conclusion
 
 For **Logic with Branching (Multi-Tenant)**:
-- **awaitly** and **Effect** both offer excellent DX because they allow imperative control flow (`if/else`) while maintaining type safety.
+- **Awaitly** and **Effect** both offer excellent DX because they allow imperative control flow (`if/else`) while maintaining type safety.
 - **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic unless you break them into many small helper functions.

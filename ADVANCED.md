@@ -16,7 +16,7 @@ This document assumes you've read the [README.md](./README.md) and want to under
 
 ## Complete Implementation Examples
 
-Let's build a realistic payment processing system using all three approaches. This isn't toy code: it's the kind of system that handles real money and can't afford to lose a penny.
+Let's build a realistic payment processing system using all four approaches. This isn't toy code: it's the kind of system that handles real money and can't afford to lose a penny.
 
 ### Shared Types and Infrastructure
 
@@ -418,7 +418,218 @@ You can inspect, log, transform, and recover from errors without special syntax.
 
 Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece. No need to rewrite your entire codebase at once.
 
-### Approach 3: The Architect (Effect)
+### Approach 3: The Orchestrator (Awaitly)
+
+```typescript
+import { createWorkflow, ok, err, type AsyncResult } from 'awaitly/workflow';
+import { retryPolicies } from 'awaitly/policies';
+
+// Type-safe error types
+type PaymentError =
+  | ValidationError
+  | IdempotencyConflict
+  | ProviderUnavailable
+  | ProviderHardFail
+  | PersistError;
+
+// Dependencies with typed Results
+const paymentDeps = {
+  parse: (raw: unknown): AsyncResult<CreatePayment, ValidationError> => {
+    const parsed = CreatePayment.safeParse(raw);
+    return parsed.success
+      ? Promise.resolve(ok(parsed.data))
+      : Promise.resolve(err(new ValidationError(parsed.error.message)));
+  },
+
+  findExisting: (
+    db: Db,
+    idemKey: string
+  ): AsyncResult<{ id: string } | null, Error> =>
+    db
+      .findPaymentByKey(idemKey)
+      .then((r) => ok(r ?? null))
+      .catch((e) => err(e instanceof Error ? e : new Error(String(e)))),
+
+  acquireLock: (
+    db: Db,
+    idemKey: string
+  ): AsyncResult<boolean, IdempotencyConflict> =>
+    db.acquireLock(idemKey).then((locked) =>
+      locked ? ok(true) : err(new IdempotencyConflict('Concurrent request'))
+    ),
+
+  callProvider: (
+    provider: Provider,
+    input: CreatePayment
+  ): AsyncResult<ProviderResponse, ProviderSoftFail | ProviderHardFail> =>
+    provider
+      .createPayment({
+        amountMinor: input.amountMinor,
+        currency: input.currency,
+        reference: input.reference,
+      })
+      .then((r) => ok(r))
+      .catch((e: any) => {
+        const status = e?.status;
+        if (status === 429 || status >= 500) {
+          return err(new ProviderSoftFail(`Provider ${status}`));
+        }
+        if (status >= 400) {
+          return err(new ProviderHardFail(`Provider ${status}`));
+        }
+        return err(new ProviderSoftFail(String(e)));
+      }),
+
+  persistSuccess: (
+    db: Db,
+    actorEmail: string,
+    input: CreatePayment,
+    resp: ProviderResponse
+  ): AsyncResult<string, PersistError> =>
+    db
+      .transaction(async (tx) => {
+        await tx.insertPayment({
+          clientId: input.clientId,
+          amountMinor: input.amountMinor,
+          currency: input.currency,
+          providerPaymentId: resp.id,
+          status: resp.status,
+          idemKey: input.idemKey,
+        });
+        await tx.insertAudit({
+          actor: actorEmail,
+          action: 'PAYMENT_CREATED',
+          metadata: { providerId: resp.id },
+        });
+        return resp.id;
+      })
+      .then((id) => ok(id))
+      .catch((e) => err(new PersistError(String(e)))),
+
+  persistFailure: (
+    db: Db,
+    actorEmail: string,
+    input: CreatePayment,
+    error: Error
+  ): AsyncResult<void, PersistError> =>
+    db
+      .transaction(async (tx) => {
+        await tx.insertPayment({
+          clientId: input.clientId,
+          amountMinor: input.amountMinor,
+          currency: input.currency,
+          providerPaymentId: 'unknown',
+          status: 'FAILED',
+          idemKey: input.idemKey,
+        });
+        await tx.insertAudit({
+          actor: actorEmail,
+          action: 'PAYMENT_CREATE_FAILED',
+          metadata: { reason: String(error) },
+        });
+      })
+      .then(() => ok(undefined))
+      .catch((e) => err(new PersistError(String(e)))),
+};
+
+export async function createPaymentAwaitly(
+  db: Db,
+  provider: Provider,
+  raw: unknown,
+  actorEmail: string
+) {
+  const workflow = createWorkflow(paymentDeps);
+
+  return workflow(async (step, deps) => {
+    // 1) Validate input
+    const input = await step(() => deps.parse(raw), {
+      name: 'Parse input',
+      key: 'parse',
+    });
+
+    // 2) Check for existing payment (idempotency)
+    const existing = await step(() => deps.findExisting(db, input.idemKey), {
+      name: 'Check existing',
+      key: `existing:${input.idemKey}`,
+    });
+
+    if (existing) {
+      return { paymentId: existing.id };
+    }
+
+    // 3) Acquire lock
+    await step(() => deps.acquireLock(db, input.idemKey), {
+      name: 'Acquire lock',
+      key: `lock:${input.idemKey}`,
+    });
+
+    // 4) Call provider with retry and timeout
+    let response: ProviderResponse;
+    try {
+      response = await step.retry(
+        () => deps.callProvider(provider, input),
+        {
+          attempts: 3,
+          backoff: 'exponential',
+          initialDelay: 200,
+          maxDelay: 3000,
+          jitter: true,
+          retryOn: (error) =>
+            error instanceof ProviderSoftFail ||
+            error instanceof TimeoutError,
+          name: 'Call provider',
+          key: `provider:${input.idemKey}`,
+        }
+      );
+    } catch (e) {
+      // Soft failures: persist failure record, then fail
+      if (e instanceof ProviderSoftFail || e instanceof TimeoutError) {
+        await step(() => deps.persistFailure(db, actorEmail, input, e), {
+          name: 'Persist failure',
+          key: `persist-fail:${input.idemKey}`,
+        });
+        throw new ProviderUnavailable(String(e));
+      }
+      throw e;
+    }
+
+    // 5) Persist success
+    const paymentId = await step(
+      () => deps.persistSuccess(db, actorEmail, input, response),
+      {
+        name: 'Persist success',
+        key: `persist:${input.idemKey}`,
+      }
+    );
+
+    return { paymentId };
+  });
+}
+```
+
+**What makes this work well:**
+
+**1. Familiar async/await syntax**
+
+The code reads like standard JavaScript. No method chaining or generator syntax to learn. Junior developers can understand it immediately.
+
+**2. Built-in retry and timeout**
+
+`step.retry()` handles exponential backoff with jitter out of the box. No need to write custom retry logic or import additional libraries.
+
+**3. Step caching with keys**
+
+Each step has a `key` parameter. If the workflow is resumed (e.g., after a crash), completed steps are skipped. This is critical for payment processing where you don't want to charge twice.
+
+**4. Automatic error inference**
+
+The workflow automatically computes the union of all possible errors from your dependencies. TypeScript knows exactly what errors can occur without manual type annotations.
+
+**5. Observability built-in**
+
+Add `onEvent` to the workflow options and you get step-by-step events for logging, tracing, and debugging.
+
+### Approach 4: The Architect (Effect)
 
 ```typescript
 import { Effect, Layer, Context, Schedule, Duration } from 'effect';
@@ -668,6 +879,29 @@ validateInput(data) // Might switch to error track
 
 The railway model makes failure a first-class concept. You can see the success path and error path clearly. You can handle specific errors at specific points. And you can compose operations without losing error information.
 
+### Awaitly: The Conductor Model
+
+Think of yourself as a conductor leading an orchestra. You don't play every instrument—you coordinate musicians (dependencies) through a performance (workflow).
+
+- **The Score**: Your workflow function is the sheet music
+- **The Musicians**: Dependencies are injected and called via `step()`
+- **Early Exit**: If any musician misses their cue (error), the performance stops
+- **Caching**: You can mark certain passages to avoid repeating them
+- **Resume**: If the concert is interrupted, you can restart from the last completed movement
+
+```typescript
+// The conductor coordinates the performance
+workflow(async (step, deps) => {
+  const user = await step(() => deps.fetchUser(id));    // Violin section
+  const posts = await step(() => deps.fetchPosts(id));  // Brass section
+  return { user, posts };                                // Final bow
+});
+```
+
+**Why this model works:**
+
+It combines the familiarity of async/await with the safety of Result types. You write code that looks like standard JavaScript, but errors are tracked, retries are built-in, and the workflow is resumable.
+
 ### Effect: The Blueprint Model
 
 Effect treats your program like architectural blueprints:
@@ -689,7 +923,7 @@ When you separate description from execution, you gain:
 
 ## Migration Strategies
 
-### The Three-Phase Evolution
+### The Four-Phase Evolution
 
 **Phase 1: Foundation (try/catch everywhere)**
 
@@ -701,9 +935,13 @@ Start here. Build basic functionality, ship features, identify pain points where
 - Your error handling code is as complex as your business logic
 - You need to compose operations but try/catch makes it painful
 
-**Phase 2: Core Domain (introduce neverthrow)**
+**Phase 2: Core Domain (introduce Result types)**
 
-Refactor your most complex business logic to use Result types. Keep try/catch at system boundaries (HTTP handlers, event listeners, etc.). Gradually expand the Result-based code.
+Refactor your most complex business logic to use Result types (neverthrow or Awaitly). Keep try/catch at system boundaries (HTTP handlers, event listeners, etc.). Gradually expand the Result-based code.
+
+**Choosing between neverthrow and Awaitly:**
+- **neverthrow**: If your team likes functional chaining (`.andThen().map()`) and you don't need retry/timeout built-in
+- **Awaitly**: If your team prefers async/await and you want retries, timeouts, caching, or workflow resume
 
 **When to move to Phase 3:**
 - You need consistent policies (timeouts, retries) across your app
@@ -711,7 +949,11 @@ Refactor your most complex business logic to use Result types. Keep try/catch at
 - Testing requires complex mocking and setup
 - Your team is comfortable with functional programming concepts
 
-**Phase 3: Policies (consider Effect)**
+**Phase 3: Policies (consider Effect or Awaitly's advanced features)**
+
+If you chose Awaitly, you may already have what you need (retries, timeouts, circuit breakers). If you need more sophisticated orchestration (layers, structured concurrency, tracing), consider Effect.
+
+**Phase 4: Full Architecture (Effect)**
 
 Only when you have complex orchestration needs. When consistent policies become important across your app. When your team is ready for the investment.
 
@@ -734,6 +976,18 @@ export function createUserSafe(data: unknown): ResultAsync<User, Error> {
   );
 }
 
+// Wrapper for Awaitly consumers
+export async function createUserSafeAwaitly(
+  data: unknown
+): AsyncResult<User, Error> {
+  try {
+    const user = await legacyCreateUser(data);
+    return ok(user);
+  } catch (e) {
+    return err(e instanceof Error ? e : new Error(String(e)));
+  }
+}
+
 // Now you can compose it
 const result = createUserSafe(userData)
   .andThen((user) => validateUser(user))
@@ -752,7 +1006,7 @@ Keep try/catch at your system boundaries but use Result types internally:
 // Edge: HTTP handler (try/catch)
 export async function POST_createPayment(req: Request, res: Response) {
   try {
-    // Internal: Use neverthrow
+    // Internal: Use neverthrow or Awaitly
     const result = await createPaymentNeverthrow(
       db,
       provider,
@@ -789,11 +1043,31 @@ async function callNeverthrowFromTryCatch() {
   return result.value;
 }
 
+// Awaitly → try/catch
+async function callAwaitlyFromTryCatch() {
+  const result = await createPaymentAwaitly(db, provider, data, actor);
+
+  if (!result.ok) {
+    throw result.error; // Convert back to exception
+  }
+
+  return result.value;
+}
+
 // try/catch → neverthrow
 function wrapLegacyFunction(data: unknown): ResultAsync<User, Error> {
   return ResultAsync.fromPromise(legacyCreateUser(data), (e) =>
     e instanceof Error ? e : new Error(String(e))
   );
+}
+
+// try/catch → Awaitly
+async function wrapLegacyForAwaitly(data: unknown): AsyncResult<User, Error> {
+  try {
+    return ok(await legacyCreateUser(data));
+  } catch (e) {
+    return err(e instanceof Error ? e : new Error(String(e)));
+  }
 }
 ```
 
@@ -910,6 +1184,122 @@ Errors are values. You can check properties, compare values, and test multiple e
 
 Want to test cascading failures? Just check the Result chain. Want to test recovery? Check that the error track switches back to success.
 
+### Testing Awaitly: Event-Driven Verification
+
+```typescript
+describe('awaitly payment processing', () => {
+  it('should handle validation errors', async () => {
+    const db = makeDb();
+    const provider = makeProvider();
+
+    const result = await createPaymentAwaitly(
+      db,
+      provider,
+      { clientId: '' }, // Invalid input
+      'actor@example.com'
+    );
+
+    // Same uniform pattern as neverthrow
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('should create payment successfully', async () => {
+    const db = makeDb();
+    const provider = makeProvider();
+
+    const result = await createPaymentAwaitly(
+      db,
+      provider,
+      validInput,
+      'actor@example.com'
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.paymentId).toBe('prov_ref1');
+    }
+  });
+
+  it('should track all steps via events', async () => {
+    const events: any[] = [];
+    const workflow = createWorkflow(paymentDeps, {
+      onEvent: (event) => events.push(event),
+    });
+
+    await workflow(async (step, deps) => {
+      // ... workflow logic
+    });
+
+    // Verify step execution order
+    expect(events.filter((e) => e.type === 'step_success').map((e) => e.name))
+      .toEqual(['Parse input', 'Check existing', 'Acquire lock', 'Call provider', 'Persist success']);
+  });
+
+  it('should retry on soft failures', async () => {
+    let attempts = 0;
+    const flakyProvider = {
+      createPayment: async () => {
+        attempts++;
+        if (attempts < 3) throw new ProviderSoftFail('Temporarily unavailable');
+        return { id: 'prov_123', status: 'CONFIRMED' as const };
+      },
+    };
+
+    const result = await createPaymentAwaitly(
+      db,
+      flakyProvider,
+      validInput,
+      'actor@example.com'
+    );
+
+    expect(attempts).toBe(3); // Retried twice before success
+    expect(result.ok).toBe(true);
+  });
+
+  it('should resume from cached steps', async () => {
+    const collector = createResumeStateCollector();
+
+    // First run: fail at persist step
+    const workflow1 = createWorkflow(paymentDeps, {
+      onEvent: collector.handleEvent,
+    });
+
+    // ... simulate failure after provider call
+    const savedState = collector.getResumeState();
+
+    // Second run: resume from saved state
+    const workflow2 = createWorkflow(paymentDeps, {
+      resumeState: savedState,
+    });
+
+    // Provider call should be skipped (cached)
+    const result = await workflow2(/* ... */);
+    expect(result.ok).toBe(true);
+  });
+});
+```
+
+**Benefits of this approach:**
+
+**1. Uniform test structure (like neverthrow)**
+
+Check `result.ok`, inspect value or error. Consistent across all tests.
+
+**2. Event stream for observability testing**
+
+Verify that steps executed in the right order, with the right timing, and with proper retry behavior.
+
+**3. Easy to test retry logic**
+
+Create flaky dependencies and verify the workflow retries correctly.
+
+**4. Resume state testing**
+
+Verify that workflows can be interrupted and resumed without repeating steps.
+
 ### Testing Effect: Maximum Control
 
 ```typescript
@@ -977,11 +1367,12 @@ The first question everyone asks: how much does this cost?
 
 - **try/catch**: Zero additional bundle size (native JavaScript)
 - **neverthrow**: Small footprint (~3-5KB minified + gzipped), tree-shakeable
+- **Awaitly**: Moderate footprint (~8-15KB depending on features used), tree-shakeable entry points
 - **Effect**: Larger runtime system (~50KB+ minified + gzipped)
 
 **When bundle size matters:**
 
-If you're building for mobile, edge functions, or environments where every kilobyte counts, try/catch's zero overhead is compelling. neverthrow adds minimal cost. Effect requires justification.
+If you're building for mobile, edge functions, or environments where every kilobyte counts, try/catch's zero overhead is compelling. neverthrow adds minimal cost. Awaitly adds more but includes retry/timeout/caching. Effect requires justification.
 
 ### Runtime Characteristics
 
@@ -993,13 +1384,17 @@ When try/catch actually catches exceptions, it's much slower than normal executi
 - Whether the exception is caught locally or bubbles up
 - The JavaScript engine's optimization (V8, SpiderMonkey, etc.)
 
-**But here's the key: exceptions are only expensive when thrown**
+**The key point: exceptions are only expensive when thrown**
 
 If your error rate is truly low (<0.1%), the performance impact is negligible. But if errors are common (validation failures, expected business logic paths), exceptions become costly.
 
 **Result types have consistent performance**
 
-Success and error paths perform similarly, making performance more predictable. Whether you return `ok(value)` or `err(error)`, the cost is roughly the same.
+Success and error paths perform similarly, making performance more predictable. Whether you return `ok(value)` or `err(error)`, the cost is roughly the same. This applies to both neverthrow and Awaitly.
+
+**Awaitly has step overhead**
+
+Each `step()` call adds a small overhead for caching checks, event emission, and error handling. This is usually negligible compared to actual I/O operations (database, network), but it's there.
 
 **Effect has overhead**
 
@@ -1020,13 +1415,22 @@ The runtime system adds consistent overhead but provides more features and bette
 - Error rates are moderate (0.1% to 10%)
 - Bundle size is a reasonable concern but not critical
 - You want composability without runtime overhead
+- You prefer functional chaining style
+
+**Choose Awaitly when:**
+
+- You need retries, timeouts, and caching built-in
+- Predictable performance matters
+- Bundle size is not critical but not unlimited
+- You prefer async/await syntax
+- You need workflow resume or observability
 
 **Choose Effect when:**
 
 - Complex orchestration outweighs performance cost
 - Consistent performance is more important than peak performance
 - Bundle size is not a constraint
-- You need sophisticated features (retries, timeouts, dependency injection)
+- You need sophisticated features (layers, structured concurrency, tracing)
 
 ## Error Recovery Patterns
 
@@ -1110,6 +1514,23 @@ function circuitBreakerResult<T, E extends Error>(
   };
 }
 
+// Awaitly: Built-in circuit breaker
+import { createCircuitBreaker } from 'awaitly/circuit-breaker';
+
+const breaker = createCircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 60000,
+  halfOpenRequests: 1,
+});
+
+const result = await workflow(async (step, deps) => {
+  return await step.withCircuitBreaker(
+    () => deps.callExternalService(),
+    breaker,
+    { name: 'External service call' }
+  );
+});
+
 // Effect: Built-in circuit breaker policy
 const circuitBreakerEffect = <T, E>(
   effect: Effect<T, E, never>,
@@ -1144,6 +1565,30 @@ function getDataWithFallback(id: string): ResultAsync<Data, never> {
       return okAsync({ id, data: null, source: 'default' });
     });
 }
+
+// Awaitly: Imperative fallbacks with logging
+const getDataWithFallbackAwaitly = createWorkflow({
+  primaryAPI,
+  cache,
+  backupAPI,
+});
+
+const result = await getDataWithFallbackAwaitly(async (step, deps) => {
+  // Try primary
+  const primaryResult = await deps.primaryAPI.getData(id);
+  if (primaryResult.ok) return primaryResult.value;
+
+  console.log('Primary failed, trying cache');
+  const cacheResult = await deps.cache.get(id);
+  if (cacheResult.ok) return cacheResult.value;
+
+  console.log('Cache failed, trying backup API');
+  const backupResult = await deps.backupAPI.getData(id);
+  if (backupResult.ok) return backupResult.value;
+
+  console.log('All sources failed, using default');
+  return { id, data: null, source: 'default' };
+});
 
 // Effect: Policy-based fallbacks
 const getDataWithFallbackEffect = (id: string) =>
@@ -1205,6 +1650,46 @@ function processOrderWithCompensation(
     .orElse((error) => runCompensations().andThen(() => errAsync(error)));
 }
 
+// Awaitly: Imperative compensation with step caching
+const processOrderAwaitly = createWorkflow({
+  processPayment,
+  reserveInventory,
+  scheduleShipping,
+  refundPayment,
+  unreserveInventory,
+});
+
+const result = await processOrderAwaitly(async (step, deps) => {
+  const compensations: (() => Promise<void>)[] = [];
+
+  try {
+    // Step 1: Process payment
+    const payment = await step(() => deps.processPayment(order.payment), {
+      key: `payment:${order.id}`,
+    });
+    compensations.push(() => deps.refundPayment(payment.id));
+
+    // Step 2: Reserve inventory
+    await step(() => deps.reserveInventory(order.items), {
+      key: `inventory:${order.id}`,
+    });
+    compensations.push(() => deps.unreserveInventory(order.items));
+
+    // Step 3: Schedule shipping
+    await step(() => deps.scheduleShipping(order), {
+      key: `shipping:${order.id}`,
+    });
+
+    return { success: true, orderId: order.id };
+  } catch (error) {
+    // Run compensations in reverse order
+    for (const compensate of compensations.reverse()) {
+      await compensate().catch(() => {}); // Best effort
+    }
+    throw error;
+  }
+});
+
 // Effect: STM (Software Transactional Memory)
 const processOrderWithSTM = (order: Order) =>
   Effect.gen(function* () {
@@ -1251,15 +1736,15 @@ A microservice was handling increasing load but error handling was scattered acr
 
 **The Solution**
 
-They adopted Effect, which allowed them to:
+They evaluated Effect and Awaitly. Effect's learning curve was too steep for the team's timeline, so they chose Awaitly, which allowed them to:
 
-- Declare retry and timeout policies once and reuse them
-- Test complex failure scenarios easily
-- Add observability without changing business logic
+- Add retry and timeout policies with `step.retry()` and `step.withTimeout()`
+- Implement circuit breakers for external services
+- Add observability via the `onEvent` hook without changing business logic
 
 **The Result**
 
-Reduced incident response time from hours to minutes. New features could be added without fear of breaking error handling. The team reported that debugging became significantly easier.
+Reduced incident response time from hours to minutes. The team reported that debugging became significantly easier because they could trace exactly which step failed and why.
 
 ### Story 3: The Legacy Migration That Didn't Break Everything
 
@@ -1279,17 +1764,35 @@ They used the boundary strategy:
 
 Improved error handling without any customer-facing downtime. The migration took 6 months but was done incrementally, feature by feature.
 
+### Story 4: The Workflow That Needed to Survive Crashes
+
+**The Problem**
+
+A long-running data processing pipeline would occasionally crash mid-execution. When restarted, it would re-process everything from the beginning, causing duplicate charges and wasted compute.
+
+**The Solution**
+
+They adopted Awaitly with step caching and resume state:
+
+- Each step was given a unique `key` for caching
+- The `onEvent` hook persisted step results to a database
+- On restart, the workflow resumed from the last successful step using `resumeState`
+
+**The Result**
+
+Zero duplicate processing. Crash recovery went from "restart everything" to "resume from last checkpoint" in under a minute.
+
 ## The Final Word
 
 Error handling isn't about choosing the "best" approach: it's about choosing the right tool for your specific context. Consider:
 
 **Team expertise**
 
-How comfortable is your team with functional programming? If everyone knows JavaScript but nobody knows functional patterns, neverthrow will require training. Effect even more so.
+How comfortable is your team with functional programming? If everyone knows JavaScript but nobody knows functional patterns, neverthrow will require training. Effect even more so. Awaitly sits in the middle: familiar async/await syntax with Result types.
 
 **System complexity**
 
-How many failure modes do you need to handle? Simple CRUD apps might be fine with try/catch. Complex distributed systems benefit from Effect's sophisticated tooling.
+How many failure modes do you need to handle? Simple CRUD apps might be fine with try/catch. Complex distributed systems benefit from Effect's sophisticated tooling. Awaitly is a good middle ground for systems that need retries, timeouts, and observability but not full dependency injection.
 
 **Performance requirements**
 
@@ -1298,6 +1801,10 @@ Are milliseconds critical, or is reliability more important? High-frequency trad
 **Migration constraints**
 
 Are you working with legacy code or starting fresh? Greenfield projects have more flexibility. Legacy systems need gradual migration strategies.
+
+**Feature requirements**
+
+Do you need retries and timeouts? Awaitly and Effect have them built-in. neverthrow doesn't. Do you need workflow resume? Awaitly has it. Do you need dependency injection with layers? Effect has it.
 
 Start simple, evolve gradually, and always remember: the best error handling strategy is the one that helps you sleep better at night.
 

@@ -7,10 +7,10 @@ See the code: `ecommerce-checkout.test.ts`
 
 ## The Approaches
 
-### 1. The awaitly Approach
+### 1. The Awaitly Approach
 *Automatic Error Unions & Flat Flow.*
 
-The "killer feature" here is **Automatic Error Inference**. The checkout process can fail in 5 different ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`). awaitly automatically infers this union type for you.
+The main advantage here is **Automatic Error Inference**. The checkout process can fail in 5 different ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`). Awaitly automatically infers this union type for you.
 
 ```typescript
 // Type inference works automatically
@@ -87,7 +87,7 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 
 ## Comparison Table
 
-| Feature | awaitly | Neverthrow | Effect |
+| Feature | Awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
 | **Error Types** | Auto-inferred Union | Manual Union | Auto-inferred (Generic) |
 | **Flow Control** | Linear (Async/Await) | Nested (Callbacks) | Linear (Generators) |
@@ -97,6 +97,6 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 ## Conclusion
 
 For **Complex Business Logic (like Checkout)**:
-- **awaitly** is the winner for **DX**. The automatic error inference and linear async/await syntax match how most developers think about business processes.
+- **Awaitly** is the winner for **DX**. The automatic error inference and linear async/await syntax match how most developers think about business processes.
 - **Effect** is the winner for **Performance/Safety**. Structured concurrency ensures no wasted resources on failure.
 - **Neverthrow** is solid but gets verbose with complex variable dependencies.
