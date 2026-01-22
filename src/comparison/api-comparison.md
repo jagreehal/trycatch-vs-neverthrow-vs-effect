@@ -64,9 +64,9 @@ import { createWorkflow } from 'awaitly/workflow';
 
 const loadUserData = createWorkflow({ fetchUser, fetchPosts });
 
-const result = await loadUserData(async (step) => {
-  const user = await step(fetchUser('1'));
-  const posts = await step(fetchPosts(user.id));
+const result = await loadUserData(async (step, deps) => {
+  const user = await step(() => deps.fetchUser('1'));
+  const posts = await step(() => deps.fetchPosts(user.id));
   return { user, posts };
 });
 ```
@@ -167,11 +167,30 @@ Effect.all([task1, task2], { concurrency: 'unbounded' })
 ```
 
 ### awaitly
-`allAsync()` helper, used inside `step()`.
+`allAsync()` helper with `step.fromResult()` for error handling, or `step.parallel()` for named operations.
 ```typescript
-import { allAsync } from 'awaitly';
+import { allAsync, isPromiseRejectedError } from 'awaitly';
 
-await step(allAsync([task1, task2]))
+// For dynamic arrays, use step.fromResult with error handling
+const results = await step.fromResult(
+  () => allAsync(items.map(item => deps.processItem(item))),
+  {
+    onError: (error): ProcessError => {
+      if (isPromiseRejectedError(error)) return 'PROCESS_FAILED';
+      return error;
+    },
+    name: 'Process items'
+  }
+);
+
+// For named parallel operations, use step.parallel
+const { users, posts } = await step.parallel(
+  {
+    users: () => deps.fetchUsers(),
+    posts: () => deps.fetchPosts(),
+  },
+  { name: 'Fetch data' }
+);
 ```
 
 ---
@@ -195,11 +214,26 @@ fetchUser('999').pipe(
 ```
 
 ### awaitly
-Inline `if` check or `match` helper. Because `step` unwraps values, you can just check the result before stepping, or handle it inside the workflow.
+Get the raw result, check it, then unwrap with `step()` if needed. Or use `match` helper for pattern matching.
 ```typescript
-// Inline recovery
-const result = await fetchUser('999');
-if (!result.ok) return defaultUser;
+// Inline recovery inside workflow
+const result = await workflow(async (step, deps) => {
+  const userResult = await deps.fetchUser('999');
+  
+  if (!userResult.ok && userResult.error === 'NOT_FOUND') {
+    return defaultUser;
+  }
+  
+  // Unwrap and continue
+  return await step(userResult);
+});
+
+// Or use match() helper
+import { match } from 'awaitly';
+const user = match(userResult, {
+  ok: (value) => value,
+  err: (error) => error === 'NOT_FOUND' ? defaultUser : defaultUser,
+});
 ```
 
 ---

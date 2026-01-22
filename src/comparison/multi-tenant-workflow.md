@@ -16,9 +16,9 @@ Since awaitly uses standard `async/await`, you can use standard JavaScript contr
 // It's just standard code!
 return workflow(async (step, deps) => {
   const tenant = await step(() => deps.fetchTenant(tenantId), {
-  name: 'Fetch tenant',
-  key: `tenant:${tenantId}`,
-});
+    name: 'Fetch tenant',
+    key: `tenant:${tenantId}`,
+  });
 
 if (tenant.plan === 'free') {
   return await step(
