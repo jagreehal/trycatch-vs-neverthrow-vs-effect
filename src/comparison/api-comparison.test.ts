@@ -1,5 +1,5 @@
 /**
- * API Comparison: neverthrow vs @jagreehal/workflow vs effect
+ * API Comparison: neverthrow vs awaitly vs effect
  *
  * This file demonstrates pattern-by-pattern equivalents between the three libraries.
  * Each test shows the same logic implemented three ways.
@@ -19,10 +19,9 @@ import {
 } from 'neverthrow';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// workflow imports
+// awaitly imports
 // ─────────────────────────────────────────────────────────────────────────────
 import {
-  createWorkflow,
   run,
   ok,
   err,
@@ -33,7 +32,8 @@ import {
   mapError,
   andThen,
   type AsyncResult,
-} from '@jagreehal/workflow';
+} from 'awaitly';
+import { createWorkflow } from 'awaitly/workflow';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // effect imports
@@ -393,7 +393,7 @@ describe('4. Wrapping throwing code', () => {
     it('wraps promises with error mapper', async () => {
       const result = await ResultAsync.fromPromise(
         riskyOperation(false),
-        () => 'OPERATION_FAILED' as const
+        () => 'OPERATION_FAILED'
       );
 
       expect(result.isOk()).toBe(true);
@@ -403,7 +403,7 @@ describe('4. Wrapping throwing code', () => {
     it('catches throws and maps to typed error', async () => {
       const result = await ResultAsync.fromPromise(
         riskyOperation(true),
-        () => 'OPERATION_FAILED' as const
+        () => 'OPERATION_FAILED'
       );
 
       expect(result.isErr()).toBe(true);
@@ -417,7 +417,7 @@ describe('4. Wrapping throwing code', () => {
     const wrappedRiskyOp = (shouldFail: boolean): AsyncResult<string, 'OPERATION_FAILED'> =>
       riskyOperation(shouldFail)
         .then((v) => ok(v))
-        .catch(() => err('OPERATION_FAILED' as const));
+        .catch(() => err('OPERATION_FAILED'));
 
     it('wraps throwing code with typed error', async () => {
       const workflow = createWorkflow({ wrappedRiskyOp });
@@ -449,7 +449,7 @@ describe('4. Wrapping throwing code', () => {
       const result = await workflow(async (step) => {
         // step.try catches throws and maps them to typed errors
         return await step.try(() => riskyOperation(true), {
-          error: 'OPERATION_FAILED' as const,
+          error: 'OPERATION_FAILED',
         });
       });
 
@@ -560,8 +560,14 @@ describe('5. Parallel operations', () => {
         const user = await step(deps.fetchUser('1'));
 
         // Then fetch posts and comments in parallel
-        const [posts, comments] = await step(
-          allAsync([deps.fetchPosts(user.id), deps.fetchComments('p1')])
+        const { posts, comments } = await step.parallel(
+          {
+            posts: () => deps.fetchPosts(user.id),
+            comments: () => deps.fetchComments('p1'),
+          },
+          {
+            name: 'Fetch posts and comments',
+          }
         );
 
         return { user, posts, comments };
@@ -664,7 +670,7 @@ describe('6. Collecting all errors', () => {
       password.length >= 8 ? ok(password) : err('WEAK_PASSWORD' as const);
 
     const validateUsername = (username: string) =>
-      username.length >= 3 ? ok(username) : err('INVALID_USERNAME' as const);
+      username.length >= 3 ? ok(username) : err('INVALID_USERNAME');
 
     it('collects all errors for form validation', () => {
       const result = allSettled([
@@ -777,7 +783,7 @@ describe('7. Error recovery', () => {
     });
   });
 
-  describe('workflow: inline conditional recovery', () => {
+  describe('awaitly: inline conditional recovery', () => {
     const fetchUser = (id: string): AsyncResult<User, 'NOT_FOUND'> =>
       Promise.resolve(
         id === '1'
@@ -785,10 +791,12 @@ describe('7. Error recovery', () => {
           : err('NOT_FOUND')
       );
 
-    it('recovers using conditional logic', async () => {
-      const result = await run(async (step) => {
+    it('recovers using conditional logic with createWorkflow', async () => {
+      const workflow = createWorkflow({ fetchUser });
+
+      const result = await workflow(async (step, deps) => {
         // Get the raw result without unwrapping
-        const userResult = await fetchUser('999');
+        const userResult = await deps.fetchUser('999');
 
         // Handle recovery inline
         if (!userResult.ok && userResult.error === 'NOT_FOUND') {
@@ -800,7 +808,9 @@ describe('7. Error recovery', () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(result.ok && result.value.name).toBe('Guest');
+      if (result.ok) {
+        expect(result.value.name).toBe('Guest');
+      }
     });
 
     it('can also use match() for pattern matching', async () => {

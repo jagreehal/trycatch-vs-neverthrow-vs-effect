@@ -7,33 +7,38 @@ See the code: `ecommerce-checkout.test.ts`
 
 ## The Approaches
 
-### 1. The Workflow Approach
+### 1. The awaitly Approach
 *Automatic Error Unions & Flat Flow.*
 
-The "killer feature" here is **Automatic Error Inference**. The checkout process can fail in 5 different ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`). Workflow automatically infers this union type for you.
+The "killer feature" here is **Automatic Error Inference**. The checkout process can fail in 5 different ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`). awaitly automatically infers this union type for you.
 
 ```typescript
 // Type inference works automatically
-const workflow = createWorkflow(deps);
+import { createWorkflow } from 'awaitly/workflow';
+import { allAsync, isPromiseRejectedError } from 'awaitly';
 
-// Parallel execution is clean
-const inventoryChecks = await step(
-  () => allAsync(
-    validatedCart.items.map(item =>
-      deps.checkInventory(item.productId, item.quantity)
-    )
-  ),
-  { name: 'Check inventory', key: `inventory:${cart.userId}` }
-);
+const workflow = createWorkflow({ validateCart, checkInventory, getPricing, ... });
 
-const pricingChecks = await step(
-  () => allAsync(
-    validatedCart.items.map(item =>
-      deps.getPricing(item.productId)
-    )
-  ),
-  { name: 'Get pricing', key: `pricing:${cart.userId}` }
-);
+return workflow(async (step, deps) => {
+  // Parallel execution with error handling
+  const inventoryChecks = await step.fromResult(
+    () => allAsync(
+      validatedCart.items.map(item =>
+        deps.checkInventory(item.productId, item.quantity)
+      )
+    ),
+    {
+      onError: (error): InventoryError => {
+        if (isPromiseRejectedError(error)) {
+          return 'OUT_OF_STOCK';
+        }
+        return error;
+      },
+      name: 'Check inventory',
+      key: `inventory:${cart.userId}`
+    }
+  );
+});
 ```
 
 **Pros:**
@@ -82,7 +87,7 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 
 ## Comparison Table
 
-| Feature | Workflow | Neverthrow | Effect |
+| Feature | awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
 | **Error Types** | Auto-inferred Union | Manual Union | Auto-inferred (Generic) |
 | **Flow Control** | Linear (Async/Await) | Nested (Callbacks) | Linear (Generators) |
@@ -92,6 +97,6 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 ## Conclusion
 
 For **Complex Business Logic (like Checkout)**:
-- **Workflow** is the winner for **DX**. The automatic error inference and linear async/await syntax match how most developers think about business processes.
+- **awaitly** is the winner for **DX**. The automatic error inference and linear async/await syntax match how most developers think about business processes.
 - **Effect** is the winner for **Performance/Safety**. Structured concurrency ensures no wasted resources on failure.
 - **Neverthrow** is solid but gets verbose with complex variable dependencies.

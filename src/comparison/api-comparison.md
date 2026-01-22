@@ -1,6 +1,6 @@
 # API Feature Comparison
 
-This document provides a direct, pattern-by-pattern comparison of **Neverthrow**, **Effect**, and **Workflow** based on the test suite in `api-comparison.test.ts`.
+This document provides a direct, pattern-by-pattern comparison of **Neverthrow**, **Effect**, and **awaitly** based on the test suite in `api-comparison.test.ts`.
 
 It highlights how each library handles common tasks like result construction, chaining, error inference, and parallelism.
 
@@ -24,10 +24,10 @@ const success = Effect.succeed({ id: '1' });
 const failure = Effect.fail('NOT_FOUND');
 ```
 
-### Workflow
+### awaitly
 Similar to Neverthrow, but returns simple objects `{ ok: true, value: ... }` or `{ ok: false, error: ... }`.
 ```typescript
-import { ok, err } from '@jagreehal/workflow';
+import { ok, err } from 'awaitly';
 const success = ok({ id: '1' });
 const failure = err('NOT_FOUND');
 ```
@@ -57,9 +57,11 @@ Effect.gen(function* () {
 });
 ```
 
-### Workflow (Async/Await)
+### awaitly (Async/Await)
 Uses standard `async/await` with a `step()` wrapper. The `step` function automatically handles early exits on error.
 ```typescript
+import { createWorkflow } from 'awaitly/workflow';
+
 const loadUserData = createWorkflow({ fetchUser, fetchPosts });
 
 const result = await loadUserData(async (step) => {
@@ -72,7 +74,7 @@ const result = await loadUserData(async (step) => {
 **DX Verdict:**
 - **Neverthrow:** Clean for 1-2 steps. Harder for 3+.
 - **Effect:** Excellent, flat syntax. Requires understanding generators.
-- **Workflow:** Most familiar for JS/TS devs (just async/await).
+- **awaitly:** Most familiar for JS/TS devs (just async/await).
 
 ---
 
@@ -102,14 +104,16 @@ Strongly typed. Errors are tracked in the second type parameter `Effect<Success,
 // Error type: 'NOT_FOUND' | 'FETCH_ERROR'
 ```
 
-### Workflow
+### awaitly
 **Automatic inference**. When using `createWorkflow`, the library automatically computes the union of all possible errors from the dependencies you use.
 ```typescript
+import { createWorkflow } from 'awaitly/workflow';
+
 const myWorkflow = createWorkflow({ fetchUser, fetchPosts });
 // TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR'
 ```
 
-**DX Verdict:** Workflow's automatic inference reduces boilerplate significantly.
+**DX Verdict:** awaitly's automatic inference reduces boilerplate significantly.
 
 ---
 
@@ -135,7 +139,7 @@ Effect.tryPromise({
 })
 ```
 
-### Workflow
+### awaitly
 `step.try()`.
 ```typescript
 await step.try(
@@ -162,9 +166,11 @@ ResultAsync.combine([task1, task2])
 Effect.all([task1, task2], { concurrency: 'unbounded' })
 ```
 
-### Workflow
+### awaitly
 `allAsync()` helper, used inside `step()`.
 ```typescript
+import { allAsync } from 'awaitly';
+
 await step(allAsync([task1, task2]))
 ```
 
@@ -188,7 +194,7 @@ fetchUser('999').pipe(
 )
 ```
 
-### Workflow
+### awaitly
 Inline `if` check or `match` helper. Because `step` unwraps values, you can just check the result before stepping, or handle it inside the workflow.
 ```typescript
 // Inline recovery
@@ -200,7 +206,7 @@ if (!result.ok) return defaultUser;
 
 ## Summary
 
-| Feature | Neverthrow | Effect | Workflow |
+| Feature | Neverthrow | Effect | awaitly |
 | :--- | :--- | :--- | :--- |
 | **Paradigm** | Functional (Chaining) | Functional (Blueprint) | Imperative (Async/Await) |
 | **Syntax** | `.andThen().map()` | `yield* Effect...` | `await step(...)` |
@@ -211,4 +217,4 @@ if (!result.ok) return defaultUser;
 **Choose based on:**
 - **Neverthrow:** If you love functional chains and want a lightweight library.
 - **Effect:** If you need a complete runtime system (retries, logging, context) and are willing to learn.
-- **Workflow:** If you want the safety of Results but the syntax of async/await, plus automatic error inference.
+- **awaitly:** If you want the safety of Results but the syntax of async/await, plus automatic error inference.

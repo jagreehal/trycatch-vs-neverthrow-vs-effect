@@ -15,15 +15,19 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ResultAsync } from 'neverthrow';
 import { Effect, Schedule, Duration } from 'effect';
 import {
-  createWorkflow,
-  isStepComplete,
   ok,
   err,
   allAsync,
+  tryAsync,
+  isPromiseRejectedError,
   type AsyncResult,
-  type ResumeStateEntry,
   type UnexpectedError,
-} from '@jagreehal/workflow';
+} from 'awaitly';
+import {
+  createWorkflow,
+  isStepComplete,
+  type ResumeStateEntry,
+} from 'awaitly/workflow';
 
 // ============================================================================
 // Shared Types
@@ -101,45 +105,33 @@ const processAnalyticsImpl = async (
 // Workflow Implementation
 // ============================================================================
 
-const fetchUser = async (userId: UserId): AsyncResult<User, FetchError> => {
-  try {
-    const user = await fetchUserImpl(userId);
-    return ok(user);
-  } catch (e) {
-    return err('USER_NOT_FOUND');
-  }
-};
+const fetchUser = (userId: UserId): AsyncResult<User, FetchError> =>
+  tryAsync(
+    async () => await fetchUserImpl(userId),
+    () => 'USER_NOT_FOUND'
+  );
 
-const fetchPosts = async (userId: UserId): AsyncResult<Post[], FetchError> => {
-  try {
-    const posts = await fetchPostsImpl(userId);
-    return ok(posts);
-  } catch (e) {
-    return err('POSTS_FETCH_FAILED');
-  }
-};
+const fetchPosts = (userId: UserId): AsyncResult<Post[], FetchError> =>
+  tryAsync(
+    async () => await fetchPostsImpl(userId),
+    () => 'POSTS_FETCH_FAILED'
+  );
 
-const fetchComments = async (postId: string): AsyncResult<Comment[], FetchError> => {
-  try {
-    const comments = await fetchCommentsImpl(postId);
-    return ok(comments);
-  } catch (e) {
-    return err('COMMENTS_FETCH_FAILED');
-  }
-};
+const fetchComments = (postId: string): AsyncResult<Comment[], FetchError> =>
+  tryAsync(
+    async () => await fetchCommentsImpl(postId),
+    () => 'COMMENTS_FETCH_FAILED'
+  );
 
-const processAnalytics = async (
+const processAnalytics = (
   user: User,
   posts: Post[],
-  allComments: Comment[]
-): AsyncResult<Analytics, ProcessError> => {
-  try {
-    const analytics = await processAnalyticsImpl(user, posts, allComments);
-    return ok(analytics);
-  } catch {
-    return err('ANALYTICS_FAILED');
-  }
-};
+  comments: Comment[]
+): AsyncResult<Analytics, ProcessError> =>
+  tryAsync(
+    async () => await processAnalyticsImpl(user, posts, comments),
+    () => 'ANALYTICS_FAILED'
+  );
 
 export async function dataPipelineWorkflow(
   userId: UserId,
@@ -149,23 +141,15 @@ export async function dataPipelineWorkflow(
     resumeState?: { steps: Map<string, ResumeStateEntry> };
   }
 ): AsyncResult<Analytics, FetchError | ProcessError | UnexpectedError> {
-  const deps = {
-    fetchUser: () => fetchUser(userId),
-    fetchPosts: () => fetchPosts(userId),
-    fetchComments: (postId: string) => fetchComments(postId),
-    processAnalytics: (user: User, posts: Post[], comments: Comment[]) =>
-      processAnalytics(user, posts, comments),
-  };
-
-  const workflow = createWorkflow(deps, {
+  const workflow = createWorkflow({ fetchUser, fetchPosts, fetchComments, processAnalytics }, {
     cache: options?.cache,
     onEvent: options?.onEvent,
     resumeState: options?.resumeState,
   });
 
-  return workflow(async (step, deps) => {
+  return workflow(async (step) => {
     const user = await step(
-      () => deps.fetchUser(),
+      () => fetchUser(userId),
       {
         name: 'Fetch user',
         key: `user:${userId}`,
@@ -173,25 +157,31 @@ export async function dataPipelineWorkflow(
     );
 
     const posts = await step(
-      () => deps.fetchPosts(),
+      () => fetchPosts(userId),
       {
         name: 'Fetch posts',
         key: `posts:${userId}`,
       }
     );
 
-    const commentResults = await step(
-      () => allAsync(posts.map(post => deps.fetchComments(post.id))),
+    const commentResults = await step.fromResult(
+      () => allAsync(posts.map(post => fetchComments(post.id))),
       {
+        onError: (error): FetchError => {
+          // Since fetchComments uses tryAsync, PromiseRejectedError shouldn't occur
+          if (isPromiseRejectedError(error)) {
+            return 'COMMENTS_FETCH_FAILED';
+          }
+          return error;
+        },
         name: 'Fetch all comments',
         key: `comments:${userId}`,
       }
     );
-
     const allComments = commentResults.flat();
 
     const analytics = await step(
-      () => deps.processAnalytics(user, posts, allComments),
+      () => processAnalytics(user, posts, allComments),
       {
         name: 'Process analytics',
         key: `analytics:${userId}`,

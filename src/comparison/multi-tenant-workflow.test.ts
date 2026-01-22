@@ -13,8 +13,8 @@
 import { describe, it, expect } from 'vitest';
 import { ResultAsync, okAsync } from 'neverthrow';
 import { Effect } from 'effect';
-import { ok, err, allAsync, type AsyncResult } from '@jagreehal/workflow';
-import { createWorkflow } from '@jagreehal/workflow';
+import { ok, err, allAsync, tryAsync, type AsyncResult, type UnexpectedError } from 'awaitly';
+import { createWorkflow } from 'awaitly/workflow';
 
 // ============================================================================
 // Shared Types
@@ -36,7 +36,7 @@ type UserError = 'USER_NOT_FOUND' | 'PERMISSION_DENIED';
 type ResourceError = 'RESOURCE_LIMIT_EXCEEDED' | 'RESOURCE_FETCH_FAILED';
 type UsageError = 'USAGE_CALCULATION_FAILED';
 
-type MultiTenantError = TenantError | UserError | ResourceError | UsageError;
+type MultiTenantError = TenantError | UserError | ResourceError | UsageError | 'NOTIFICATION_FAILED';
 
 // ============================================================================
 // Shared Dependencies
@@ -123,93 +123,83 @@ const sendBillingNotificationImpl = async (
 // Workflow Implementation
 // ============================================================================
 
-const fetchTenant = async (tenantId: TenantId): AsyncResult<Tenant, TenantError> => {
-  try {
-    const tenant = await fetchTenantImpl(tenantId);
-    return ok(tenant);
-  } catch (e: any) {
-    return err(e.message as TenantError);
-  }
-};
+const fetchTenant = (tenantId: TenantId): AsyncResult<Tenant, TenantError> =>
+  tryAsync(
+    async () => await fetchTenantImpl(tenantId),
+    (e) => {
+      if (e instanceof Error && e.message === 'TENANT_NOT_FOUND') {
+        return 'TENANT_NOT_FOUND' as TenantError;
+      }
+      return 'TENANT_NOT_FOUND' as TenantError;
+    }
+  );
 
-const fetchUsers = async (tenantId: TenantId): AsyncResult<User[], UserError> => {
-  try {
-    const users = await fetchUsersImpl(tenantId);
-    return ok(users);
-  } catch {
-    return err('USER_NOT_FOUND');
-  }
-};
+const fetchUsers = (tenantId: TenantId): AsyncResult<User[], UserError> =>
+  tryAsync(
+    async () => await fetchUsersImpl(tenantId),
+    () => 'USER_NOT_FOUND'
+  );
 
-const fetchResources = async (tenantId: TenantId): AsyncResult<Resource[], ResourceError> => {
-  try {
-    const resources = await fetchResourcesImpl(tenantId);
-    return ok(resources);
-  } catch (e: any) {
-    return err(e.message as ResourceError);
-  }
-};
+const fetchResources = (tenantId: TenantId): AsyncResult<Resource[], ResourceError> =>
+  tryAsync(
+    async () => await fetchResourcesImpl(tenantId),
+    (e) => {
+      if (e instanceof Error && e.message === 'RESOURCE_LIMIT_EXCEEDED') {
+        return 'RESOURCE_LIMIT_EXCEEDED' as ResourceError;
+      }
+      return 'RESOURCE_FETCH_FAILED' as ResourceError;
+    }
+  );
 
-const calculateUsage = async (
+const calculateUsage = (
   tenant: Tenant,
   users: User[],
   resources: Resource[]
-): AsyncResult<Usage, UsageError> => {
-  try {
-    const usage = await calculateUsageImpl(tenant, users, resources);
-    return ok(usage);
-  } catch {
-    return err('USAGE_CALCULATION_FAILED');
-  }
-};
+): AsyncResult<Usage, UsageError> =>
+  tryAsync(
+    async () => await calculateUsageImpl(tenant, users, resources),
+    () => 'USAGE_CALCULATION_FAILED'
+  );
 
-const sendBillingNotification = async (
+const sendBillingNotification = (
   tenant: Tenant,
   usage: Usage
-): AsyncResult<void, 'NOTIFICATION_FAILED'> => {
-  try {
-    await sendBillingNotificationImpl(tenant, usage);
-    return ok(undefined);
-  } catch {
-    return err('NOTIFICATION_FAILED');
-  }
-};
+): AsyncResult<void, 'NOTIFICATION_FAILED'> =>
+  tryAsync(
+    async () => await sendBillingNotificationImpl(tenant, usage),
+    () => 'NOTIFICATION_FAILED'
+  );
 
 export async function multiTenantWorkflow(
   tenantId: TenantId
-): AsyncResult<Usage, MultiTenantError> {
-  const deps = {
-    fetchTenant: () => fetchTenant(tenantId),
-    fetchUsers: () => fetchUsers(tenantId),
-    fetchResources: () => fetchResources(tenantId),
-    calculateUsage: (tenant: Tenant, users: User[], resources: Resource[]) =>
-      calculateUsage(tenant, users, resources),
-    sendBillingNotification: (tenant: Tenant, usage: Usage) =>
-      sendBillingNotification(tenant, usage),
-  };
+): AsyncResult<Usage, MultiTenantError | UnexpectedError> {
+  const workflow = createWorkflow({
+    fetchTenant,
+    fetchUsers,
+    fetchResources,
+    calculateUsage,
+    sendBillingNotification,
+  });
 
-  const workflow = createWorkflow(deps);
-
-  return workflow(async (step, deps) => {
-    const tenant = await step(() => deps.fetchTenant(), {
+  return workflow(async (step) => {
+    const tenant = await step(() => fetchTenant(tenantId), {
       name: 'Fetch tenant',
       key: `tenant:${tenantId}`,
     });
 
     if (tenant.plan !== 'free') {
-      const [users, resources] = await step(
-        () => allAsync([
-          deps.fetchUsers(),
-          deps.fetchResources(),
-        ]),
+      const { users, resources } = await step.parallel(
+        {
+          users: () => fetchUsers(tenantId),
+          resources: () => fetchResources(tenantId),
+        },
         {
           name: 'Fetch tenant data',
-          key: `tenant-data:${tenantId}`,
         }
       );
 
       const usage = await step(
-        () => deps.calculateUsage(tenant, users, resources),
+        () => calculateUsage(tenant, users, resources),
         {
           name: 'Calculate usage',
           key: `usage:${tenantId}`,
@@ -218,13 +208,13 @@ export async function multiTenantWorkflow(
 
       switch (tenant.plan) {
         case 'pro':
-          await step(() => deps.sendBillingNotification(tenant, usage), {
+          await step(() => sendBillingNotification(tenant, usage), {
             name: 'Send pro billing notification',
             key: `notify:${tenantId}:pro`,
           });
           break;
         case 'enterprise':
-          await step(() => deps.sendBillingNotification(tenant, usage), {
+          await step(() => sendBillingNotification(tenant, usage), {
             name: 'Send enterprise billing notification',
             key: `notify:${tenantId}:enterprise`,
           });
@@ -236,7 +226,7 @@ export async function multiTenantWorkflow(
       return usage;
     } else {
       const usage = await step(
-        () => deps.calculateUsage(tenant, [], []),
+        () => calculateUsage(tenant, [], []),
         {
           name: 'Calculate usage (free plan)',
           key: `usage:${tenantId}:free`,
@@ -291,7 +281,7 @@ const sendBillingNotificationNt = (
 
 export function multiTenantNeverthrow(
   tenantId: TenantId
-): ResultAsync<Usage, MultiTenantError> {
+): ResultAsync<Usage, MultiTenantError | 'NOTIFICATION_FAILED'> {
   return fetchTenantNt(tenantId).andThen((tenant) => {
     if (tenant.plan === 'free') {
       return calculateUsageNt(tenant, [], []);
@@ -352,7 +342,7 @@ const sendBillingNotificationEffect = (
     catch: () => 'NOTIFICATION_FAILED' as const,
   });
 
-export const multiTenantEffect = (tenantId: TenantId): Effect.Effect<Usage, MultiTenantError> =>
+export const multiTenantEffect = (tenantId: TenantId): Effect.Effect<Usage, MultiTenantError | 'NOTIFICATION_FAILED'> =>
   Effect.gen(function* () {
     const tenant = yield* fetchTenantEffect(tenantId);
 

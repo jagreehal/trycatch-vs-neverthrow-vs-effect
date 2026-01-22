@@ -14,8 +14,8 @@
 import { describe, it, expect } from 'vitest';
 import { ResultAsync, errAsync, Result, ok as ntOk, err as ntErr } from 'neverthrow';
 import { Effect } from 'effect';
-import { ok, err, allAsync, type AsyncResult } from '@jagreehal/workflow';
-import { createWorkflow } from '@jagreehal/workflow';
+import { ok, err, allAsync, tryAsync, isPromiseRejectedError, type AsyncResult, type UnexpectedError } from 'awaitly';
+import { createWorkflow } from 'awaitly/workflow';
 
 // ============================================================================
 // Shared Types & Errors
@@ -119,141 +119,170 @@ const createOrderImpl = async (
 // Workflow Implementation
 // ============================================================================
 
-const validateCart = async (cart: Cart): AsyncResult<Cart, ValidationError> => {
-  const result = validateCartImpl(cart);
-  return result.isOk() ? ok(result.value) : err(result.error);
-};
+const validateCart = (cart: Cart): AsyncResult<Cart, ValidationError> =>
+  Promise.resolve(validateCartImpl(cart)).then(result =>
+    result.isOk() ? ok(result.value) : err(result.error)
+  );
 
-const checkInventory = async (
+const checkInventory = (
   productId: ProductId,
   quantity: number
-): AsyncResult<Inventory, InventoryError> => {
-  try {
-    const inventory = await checkInventoryImpl(productId, quantity);
-    return ok(inventory);
-  } catch (e: any) {
-    return err(e.message as InventoryError);
-  }
-};
+): AsyncResult<Inventory, InventoryError> =>
+  tryAsync(
+    async () => await checkInventoryImpl(productId, quantity),
+    (e) => {
+      if (e instanceof Error) {
+        const message = e.message;
+        if (message === 'OUT_OF_STOCK' || message === 'INSUFFICIENT_QUANTITY') {
+          return message as InventoryError;
+        }
+      }
+      return 'OUT_OF_STOCK' as InventoryError;
+    }
+  );
 
-const getPricing = async (productId: ProductId): AsyncResult<Price, PricingError> => {
-  try {
-    const price = await getPricingImpl(productId);
-    return ok(price);
-  } catch (e: any) {
-    return err(e.message as PricingError);
-  }
-};
+const getPricing = (productId: ProductId): AsyncResult<Price, PricingError> =>
+  tryAsync(
+    async () => await getPricingImpl(productId),
+    (e) => {
+      if (e instanceof Error && e.message === 'PRICING_UNAVAILABLE') {
+        return 'PRICING_UNAVAILABLE' as PricingError;
+      }
+      return 'PRICING_UNAVAILABLE' as PricingError;
+    }
+  );
 
-const reserveInventory = async (
+const reserveInventory = (
   productId: ProductId,
   quantity: number
-): AsyncResult<void, InventoryError> => {
-  try {
-    await reserveInventoryImpl(productId, quantity);
-    return ok(undefined);
-  } catch (e: any) {
-    return err(e.message as InventoryError);
-  }
-};
+): AsyncResult<void, InventoryError> =>
+  tryAsync(
+    async () => await reserveInventoryImpl(productId, quantity),
+    (e) => {
+      if (e instanceof Error) {
+        const message = e.message;
+        if (message === 'OUT_OF_STOCK' || message === 'INSUFFICIENT_QUANTITY') {
+          return message as InventoryError;
+        }
+      }
+      return 'OUT_OF_STOCK' as InventoryError;
+    }
+  );
 
-const processPayment = async (
+const processPayment = (
   paymentMethod: PaymentMethod,
   amount: number
-): AsyncResult<{ transactionId: string }, PaymentError> => {
-  try {
-    const payment = await processPaymentImpl(paymentMethod, amount);
-    return ok(payment);
-  } catch (e: any) {
-    return err(e.message as PaymentError);
-  }
-};
+): AsyncResult<{ transactionId: string }, PaymentError> =>
+  tryAsync(
+    async () => await processPaymentImpl(paymentMethod, amount),
+    (e) => {
+      if (e instanceof Error) {
+        const message = e.message;
+        if (message === 'PAYMENT_DECLINED' || message === 'PAYMENT_TIMEOUT') {
+          return message as PaymentError;
+        }
+      }
+      return 'PAYMENT_DECLINED' as PaymentError;
+    }
+  );
 
-const createOrder = async (
+const createOrder = (
   userId: UserId,
   items: CartItem[],
   total: number,
   transactionId: string
-): AsyncResult<Order, OrderError> => {
-  try {
-    const order = await createOrderImpl(userId, items, total, transactionId);
-    return ok(order);
-  } catch {
-    return err('ORDER_CREATION_FAILED');
-  }
-};
+): AsyncResult<Order, OrderError> =>
+  tryAsync(
+    async () => await createOrderImpl(userId, items, total, transactionId),
+    () => 'ORDER_CREATION_FAILED'
+  );
 
 export async function checkoutWorkflow(
   cart: Cart,
   paymentMethod: PaymentMethod
-): AsyncResult<Order, CheckoutError> {
-  const deps = {
-    validateCart: () => validateCart(cart),
-    checkInventory: (productId: ProductId, quantity: number) =>
-      checkInventory(productId, quantity),
-    getPricing: (productId: ProductId) => getPricing(productId),
-    reserveInventory: (productId: ProductId, quantity: number) =>
-      reserveInventory(productId, quantity),
-    processPayment: (amount: number) => processPayment(paymentMethod, amount),
-    createOrder: (items: CartItem[], total: number, transactionId: string) =>
-      createOrder(cart.userId, items, total, transactionId),
-  };
+): AsyncResult<Order, CheckoutError | UnexpectedError> {
+  const workflow = createWorkflow({
+    validateCart,
+    checkInventory,
+    getPricing,
+    reserveInventory,
+    processPayment,
+    createOrder,
+  });
 
-  const workflow = createWorkflow(deps);
-
-  return workflow(async (step, deps) => {
-    const validatedCart = await step(() => deps.validateCart(), {
+  return workflow(async (step) => {
+    const validatedCart = await step(() => validateCart(cart), {
       name: 'Validate cart',
       key: `validate:${cart.userId}`,
     });
 
-    const inventoryChecks = await step(
+    const inventoryChecks = await step.fromResult(
       () => allAsync(
         validatedCart.items.map(item =>
-          deps.checkInventory(item.productId, item.quantity)
+          checkInventory(item.productId, item.quantity)
         )
       ),
       {
+        onError: (error): InventoryError => {
+          // Since checkInventory uses tryAsync, PromiseRejectedError shouldn't occur
+          // but we handle it defensively by mapping to a domain error
+          if (isPromiseRejectedError(error)) {
+            return 'OUT_OF_STOCK';
+          }
+          return error;
+        },
         name: 'Check inventory',
         key: `inventory:${cart.userId}`,
       }
     );
 
-    const pricingChecks = await step(
+    const pricingChecks = await step.fromResult(
       () => allAsync(
         validatedCart.items.map(item =>
-          deps.getPricing(item.productId)
+          getPricing(item.productId)
         )
       ),
       {
+        onError: (error): PricingError => {
+          if (isPromiseRejectedError(error)) {
+            return 'PRICING_UNAVAILABLE';
+          }
+          return error;
+        },
         name: 'Get pricing',
         key: `pricing:${cart.userId}`,
       }
     );
 
-    await step(
+    await step.fromResult(
       () => allAsync(
         validatedCart.items.map(item =>
-          deps.reserveInventory(item.productId, item.quantity)
+          reserveInventory(item.productId, item.quantity)
         )
       ),
       {
+        onError: (error): InventoryError => {
+          if (isPromiseRejectedError(error)) {
+            return 'OUT_OF_STOCK';
+          }
+          return error;
+        },
         name: 'Reserve inventory',
         key: `reserve:${cart.userId}`,
       }
     );
 
-    const total = pricingChecks.reduce((sum, price, i) => {
+    const total = pricingChecks.reduce((sum: number, price: Price, i: number) => {
       return sum + price.amount * validatedCart.items[i].quantity;
     }, 0);
 
-    const payment = await step(() => deps.processPayment(total), {
+    const payment = await step(() => processPayment(paymentMethod, total), {
       name: 'Process payment',
       key: `payment:${paymentMethod.id}:${total}`,
     });
 
     const order = await step(
-      () => deps.createOrder(validatedCart.items, total, payment.transactionId),
+      () => createOrder(cart.userId, validatedCart.items, total, payment.transactionId),
       {
         name: 'Create order',
         key: `order:${payment.transactionId}`,

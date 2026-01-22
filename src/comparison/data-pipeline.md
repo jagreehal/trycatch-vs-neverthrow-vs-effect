@@ -7,20 +7,22 @@ See the code: `data-pipeline.test.ts`
 
 ## The Approaches
 
-### 1. The Workflow Approach
+### 1. The awaitly Approach
 *High readability, built-in caching and resume.*
 
-Workflow excels here because caching and resume state are first-class features. You don't need to wrap your logic in external helper functions; you just configure the step with a `key`.
+awaitly excels here because caching and resume state are first-class features. You don't need to wrap your logic in external helper functions; you just configure the step with a `key`.
 
 ```typescript
 // Built-in caching and resume
-const user = await step(
-  () => deps.fetchUser(),
-  {
-    name: 'Fetch user',
-    key: `user:${userId}`, // Enables caching & resume
-  }
-);
+return workflow(async (step, deps) => {
+  const user = await step(
+    () => deps.fetchUser(userId),
+    {
+      name: 'Fetch user',
+      key: `user:${userId}`, // Enables caching & resume
+    }
+  );
+});
 ```
 
 **Pros:**
@@ -30,7 +32,7 @@ const user = await step(
 - **Automatic Error Inference:** TypeScript automatically infers the union of all possible errors (plus the standard `UnexpectedError` safety net unless you opt into strict mode).
 
 **Cons:**
-- Requires the `createWorkflow` wrapper to get the full power of caching/inference.
+- Requires the `createWorkflow` wrapper (from `awaitly/workflow`) to get the full power of caching/inference.
 
 ### 2. The Neverthrow Approach
 *Explicit, but requires manual helpers.*
@@ -71,7 +73,7 @@ Effect is designed for this. It treats retries, timeouts, and concurrency limits
 
 ## Comparison Table
 
-| Feature | Workflow | Neverthrow | Effect |
+| Feature | awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
 | **Caching** | Built-in (`key` param) | Manual implementation | Via Request Cache service / manual wiring |
 | **Resume State** | Built-in (`resumeState`) | Manual implementation | Manual implementation |
@@ -84,5 +86,5 @@ Effect is designed for this. It treats retries, timeouts, and concurrency limits
 
 For **Data Pipelines**:
 - **Effect** is the most robust choice if you need complex policies (circuit breakers, rate limiting, retries) and are willing to wire the runtime services you need.
-- **Workflow** is the pragmatic choice. It gives you caching, resume state, and observability with zero boilerplate and familiar syntax.
+- **awaitly** is the pragmatic choice. It gives you caching, resume state, and observability with zero boilerplate and familiar syntax.
 - **Neverthrow** struggles here without extra utility libraries for caching and resume functionality.

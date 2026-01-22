@@ -76,14 +76,14 @@ All four approaches model the same payment workflow. In the repo, the implementa
 | **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Minimal |
 | **Neverthrow** | High | High | High (chains), Medium (async/await) | Light |
 | **Effect** | Very High | Very High | Low → Medium (learning) | Heavy |
-| **Workflow** | High | High | High (async/await) | Light |
+| **awaitly** | High | High | High (async/await) | Light |
 
 **Key Differentiators:**
 
 - **Vanilla**: Simplest to write, but errors hide in function signatures.
 - **Neverthrow**: Best for functional chaining and explicit error types.
 - **Effect**: Most powerful (DI, retries, timeouts) but has a steep learning curve.
-- **Workflow**: Familiar async/await syntax with automatic error inference and caching.
+- **awaitly**: Familiar async/await syntax with automatic error inference and caching.
 
 ## Four Philosophies
 
@@ -312,7 +312,7 @@ return parse(raw)
 
 It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
 
-**Note:** neverthrow feels best when you lean into its chaining style (`ResultAsync` + `.andThen()`). If your team prefers async/await flows, you'll either write more `.isErr()` checks or wrap helpers to keep the happy path clean. Workflow takes the opposite bet: keep async/await and use `step()` for early-exit propagation.
+**Note:** neverthrow feels best when you lean into its chaining style (`ResultAsync` + `.andThen()`). If your team prefers async/await flows, you'll either write more `.isErr()` checks or wrap helpers to keep the happy path clean. awaitly takes the opposite bet: keep async/await and use `step()` for early-exit propagation.
 
 **Errors are data, not control flow**
 
@@ -444,16 +444,16 @@ Same retry logic everywhere. Consistent error handling across your entire app. W
 
 ---
 
-### 🎼 The Orchestrator (Workflow)
+### 🎼 The Orchestrator (awaitly)
 
 "Let me write familiar async/await code with the type safety of Result types"
 
 What if you could write code that looks like async/await (familiar to everyone) but with the type safety of Result types? What if your functions were honest about failure, but you didn't have to learn monadic chains or generator syntax?
 
-Welcome to Workflow, where `step()` unwraps Results and exits early on error—automatically.
+Welcome to awaitly, where `step()` unwraps Results and exits early on error—automatically.
 
 ```typescript
-import { run, ok, err, type AsyncResult } from '@jagreehal/workflow';
+import { run, ok, err, type AsyncResult } from 'awaitly';
 
 const validatePayment = async (data: unknown): AsyncResult<Payment, ValidationError> =>
   isValid(data) ? ok(parsePayment(data)) : err(new ValidationError('Invalid'));
@@ -479,15 +479,15 @@ const result = await run(async (step) => {
 For complex workflows needing caching, resume state, or automatic error inference:
 
 ```typescript
-import { createWorkflow } from '@jagreehal/workflow';
+import { createWorkflow } from 'awaitly/workflow';
 
 // Declare dependencies → error union computed automatically
 const makePayment = createWorkflow({ validatePayment, chargeCustomer, saveToDatabase });
 
-const result = await makePayment(async (step) => {
-  const payment = await step(() => validatePayment(data), { key: 'validate' }); // Cached
-  const charge = await step(() => chargeCustomer(payment), { key: 'charge' });
-  await step(() => saveToDatabase(charge), { key: 'save' });
+const result = await makePayment(async (step, deps) => {
+  const payment = await step(() => deps.validatePayment(data), { key: 'validate' }); // Cached
+  const charge = await step(() => deps.chargeCustomer(payment), { key: 'charge' });
+  await step(() => deps.saveToDatabase(charge), { key: 'save' });
   return { success: true };
 });
 
@@ -502,16 +502,16 @@ The scariest failure mode is "provider charge succeeded, but persistence failed.
 ```typescript
 const makePayment = createWorkflow({ validatePayment, callProvider, persistSuccess });
 
-const result = await makePayment(async (step) => {
-  const payment = await step(() => validatePayment(data), { key: 'validate' });
+const result = await makePayment(async (step, deps) => {
+  const payment = await step(() => deps.validatePayment(data), { key: 'validate' });
 
   // Never repeat this once it succeeds:
-  const charge = await step(() => callProvider(payment), {
+  const charge = await step(() => deps.callProvider(payment), {
     key: `charge:${payment.idempotencyKey}`,
   });
 
   // If this fails (DB down), you can rerun later and resume here without re-charging:
-  await step(() => persistSuccess(payment, charge), { key: `persist:${charge.id}` });
+  await step(() => deps.persistSuccess(payment, charge), { key: `persist:${charge.id}` });
 
   return { paymentId: charge.paymentId };
 });
@@ -525,7 +525,7 @@ The beautiful thing? The sheet music (your workflow) automatically documents all
 
 ```mermaid
 flowchart TD
-    subgraph "Workflow: Step-by-Step Execution"
+    subgraph "awaitly: Step-by-Step Execution"
         subgraph "Happy Path (step() unwraps Results)"
             S1["🎬 step(validatePayment)"]
             S2["🎬 step(checkExisting)"]
@@ -563,7 +563,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph "Workflow: Dependency-Declared Orchestration"
+    subgraph "awaitly: Dependency-Declared Orchestration"
         subgraph "1. Declare Dependencies"
             D1["🎼 validatePayment"]
             D2["🎼 chargeCustomer"]
@@ -596,7 +596,7 @@ flowchart TD
 
 **When to use this:**
 
-Use Workflow when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, or when you're building workflows that benefit from step caching and resume state.
+Use awaitly when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, or when you're building workflows that benefit from step caching and resume state.
 
 **Two APIs for different needs:**
 
@@ -621,7 +621,7 @@ const result = await run(async (step) => {
 
 **Early exit is automatic**
 
-`step()` unwraps Results. If it's an error, the workflow exits immediately. No need to check `.isErr()` everywhere. The happy path stays clean and readable.
+`step()` unwraps Results. If it's an error, the execution exits immediately. No need to check `.isErr()` everywhere. The happy path stays clean and readable.
 
 **Handle throwing operations with step.try()**
 
@@ -675,7 +675,7 @@ Here's the honest truth: **it depends on what you're building**.
 - You want consistent policies applied uniformly across your application
 - Your team has capacity to learn functional programming concepts and advanced abstractions
 
-### Consider Workflow when:
+### Consider awaitly when:
 
 - You want Result types with familiar async/await syntax
 - You want the compiler to verify that you've handled all error cases
@@ -700,26 +700,26 @@ flowchart TD
     WantAutoInference -->|Yes| FamiliarSyntax{Want async/await syntax?}
     WantAutoInference -->|No| NeedsPolicies{Need timeouts, retries, etc?}
 
-    FamiliarSyntax -->|Yes| Workflow[🎼 Workflow]
+    FamiliarSyntax -->|Yes| awaitly[🎼 awaitly]
     FamiliarSyntax -->|No| Neverthrow
 
     NeedsPolicies -->|Yes| TeamReady{Team ready for learning?}
     NeedsPolicies -->|No| Neverthrow
 
     TeamReady -->|Yes| Effect[🏗️ Effect]
-    TeamReady -->|No| Workflow
+    TeamReady -->|No| awaitly
 
     TryCatch --> TryCatchGood[✅ Perfect for simple cases<br/>✅ Everyone knows it<br/>❌ Gets messy with complexity]
 
     Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Learning curve for team]
 
-    Workflow --> WorkflowGood[✅ Familiar async/await<br/>✅ Early-exit Result propagation<br/>✅ Optional inference + caching]
+    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Early-exit Result propagation<br/>✅ Optional inference + caching]
 
     Effect --> EffectGood[✅ Powerful policies<br/>✅ Excellent testability<br/>❌ Steep learning curve]
 
     style TryCatch fill:#FFE4B5
     style Neverthrow fill:#E0E0E0
-    style Workflow fill:#E8F5E9
+    style awaitly fill:#E8F5E9
     style Effect fill:#E6E6FA
 ```
 
@@ -755,8 +755,8 @@ const divideEffect = (a: number, b: number) =>
 ```
 
 ```typescript
-// Workflow approach
-import { run, ok, err, type Result } from '@jagreehal/workflow';
+// awaitly approach
+import { run, ok, err, type Result } from 'awaitly';
 
 const divideWorkflow = (a: number, b: number): Result<number, Error> =>
   b === 0 ? err(new Error('Division by zero')) : ok(a / b);
@@ -774,7 +774,7 @@ Notice how the function signatures tell different stories:
 - try/catch: `number` (lies about potential failure)
 - neverthrow: `Result<number, Error>` (honest about what can happen)
 - Effect: `Effect<number, Error, never>` (describes a computation that might fail)
-- Workflow: `Result<number, Error>` (honest types, composed with `step()`)
+- awaitly: `Result<number, Error>` (honest types, composed with `step()`)
 
 ## Want to Learn More?
 
@@ -791,7 +791,7 @@ Here's what I've learned after years of building systems that break in creative 
 You already have a rubric now: **Visible, Composable, Honest**.  
 Pick the trade-off you're willing to live with — because at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
 
-**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Workflow when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
+**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use awaitly when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
 
 But whatever you choose, choose deliberately. Don't just throw try/catch around everything and hope for the best. And don't pick Effect just because it sounds impressive on your resume.
 

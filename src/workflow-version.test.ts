@@ -1,7 +1,7 @@
 /**
  * Workflow Implementation - Payment Processing
  *
- * This demonstrates @jagreehal/workflow's key advantages:
+ * This demonstrates awaitly's key advantages:
  * 1. Automatic error type inference from dependencies
  * 2. Clean async/await syntax with step()
  * 3. Built-in retry, timeout, and caching
@@ -11,14 +11,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { ok, err, type AsyncResult, type UnexpectedError } from 'awaitly';
 import {
   createWorkflow,
-  ok,
-  err,
-  type AsyncResult,
   isStepComplete,
   type ResumeStateEntry,
-} from '@jagreehal/workflow';
+} from 'awaitly/workflow';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types & Errors (shared across all implementations)
@@ -277,7 +275,7 @@ export function createPaymentWorkflow(
   provider: Provider,
   raw: unknown,
   actorEmail: string
-) {
+): AsyncResult<{ paymentId: string }, ValidationError | IdempotencyConflict | ProviderHardFail | ProviderUnavailable | PersistError | UnexpectedError> {
   // Create workflow with event stream for observability
   const savedSteps = new Map<string, ResumeStateEntry>();
 
@@ -318,9 +316,11 @@ export function createPaymentWorkflow(
     const providerResult = await deps.callProvider(provider, input);
 
     if (!providerResult.ok) {
-      // Persist failure for audit trail
-      await persistFailure(db, input, providerResult.error, actorEmail);
-      return await step(providerResult); // This will early-exit with the error
+      // Persist failure for audit trail (fire-and-forget side effect)
+      persistFailure(db, input, providerResult.error, actorEmail).catch(() => {
+        // Swallow errors in failure persistence
+      });
+      return await step(providerResult); // Early-exit with the error
     }
 
     // 5) Persist success
@@ -378,7 +378,9 @@ describe('workflow', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.ok && result.value.paymentId).toBe('prov_ref1');
+    if (result.ok) {
+      expect(result.value.paymentId).toBe('prov_ref1');
+    }
   });
 
   it('fails validation on bad input', async () => {
@@ -502,7 +504,9 @@ describe('workflow', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.ok && result.value.paymentId).toBe('prov_existing');
+    if (result.ok) {
+      expect(result.value.paymentId).toBe('prov_existing');
+    }
     expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -574,9 +578,9 @@ describe('workflow: additional features', () => {
     const workflow = createWorkflow(deps);
 
     const result = await workflow(async (step, d) => {
-      const user = await step(d.validateUser('1'));
-      await step(d.checkPermission(user.id));
-      await step(d.saveData('test'));
+      const user = await step(() => d.validateUser('1'));
+      await step(() => d.checkPermission(user.id));
+      await step(() => d.saveData('test'));
       return 'success';
     });
 
@@ -584,7 +588,7 @@ describe('workflow: additional features', () => {
 
     // Test error case - TypeScript knows exact error type
     const errorResult = await workflow(async (step, d) => {
-      await step(d.validateUser('999')); // Will fail
+      await step(() => d.validateUser('999')); // Will fail
       return 'never reached';
     });
 
