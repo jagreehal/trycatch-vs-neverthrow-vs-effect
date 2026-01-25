@@ -61,6 +61,29 @@ if (tenant.plan === 'free') {
 **Pros:**
 - **Zero Friction:** No need to learn "functional" equivalents of `if` statements.
 - **Readability:** Junior devs understand this immediately.
+- **Human-in-the-Loop:** For multi-tenant workflows needing approval (e.g., enterprise plan changes), Awaitly provides `createHITLOrchestrator` for pausing workflows pending human approval.
+
+#### Approval Workflows for Enterprise Tenants
+
+```typescript
+import { createHITLOrchestrator, pendingApproval } from 'awaitly/hitl';
+
+const orchestrator = createHITLOrchestrator({ approvalStore, workflowStateStore });
+
+await orchestrator.execute('plan-upgrade', workflowFactory, async (step, deps, input) => {
+  const tenant = await step(() => deps.fetchTenant(input.tenantId));
+
+  if (tenant.plan === 'enterprise' && input.newPlan === 'custom') {
+    // Pause for sales team approval
+    await step(() => pendingApproval('Sales approval required'), {
+      key: `approval:${input.tenantId}`,
+    });
+  }
+
+  await step(() => deps.upgradePlan(tenant, input.newPlan));
+  return { success: true };
+}, input);
+```
 
 ### 2. The Neverthrow Approach
 *Functional Conditionals.*
@@ -110,9 +133,12 @@ Effect.gen(function* () {
 | **Control Flow** | Native (`if`/`switch`) | Functional (`match` / conditionals inside `map`) | Native (`if`/`switch` in gen) |
 | **Branch Typing** | Automatic Union | Manual Alignment | Automatic Union |
 | **Readability** | High | Low (for complex branches) | High |
+| **Approval Workflows** | Built-in (HITL) | Manual | Manual |
+| **Durable Execution** | Built-in | Manual | Manual |
 
 ## Conclusion
 
 For **Logic with Branching (Multi-Tenant)**:
-- **Awaitly** and **Effect** both offer excellent DX because they allow imperative control flow (`if/else`) while maintaining type safety.
-- **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic unless you break them into many small helper functions.
+- **Awaitly** offers the best DX: imperative control flow, automatic type unions, plus built-in support for approval workflows (HITL) and durable execution for long-running tenant operations.
+- **Effect** offers excellent syntax via generators and powerful concurrency, but lacks built-in HITL.
+- **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic.

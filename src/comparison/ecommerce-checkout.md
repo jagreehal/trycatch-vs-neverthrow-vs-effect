@@ -45,6 +45,35 @@ return workflow(async (step, deps) => {
 - **Type Safety without Boilerplate:** You don't need to manually type `Result<Order, Error1 | Error2 | Error3 ...>`.
 - **Flat Structure:** Async/await keeps the code linear, even with 6+ steps.
 - **Early Exit:** If the cart is invalid, it stops immediately. No need to check `.isErr()` after every line.
+- **Saga Pattern:** For checkout flows that need rollback (refund payment if shipping fails), Awaitly provides `createSagaWorkflow` with automatic LIFO compensation.
+
+#### Saga Pattern for Checkout
+
+When checkout steps need rollback on failure:
+
+```typescript
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+
+const checkout = createSagaWorkflow({ reserveInventory, chargeCard, scheduleShipping });
+
+const result = await checkout(async (saga, deps) => {
+  const reservation = await saga.step(
+    () => deps.reserveInventory(items),
+    { compensate: (res) => releaseInventory(res.id) }
+  );
+
+  const payment = await saga.step(
+    () => deps.chargeCard(amount),
+    { compensate: (p) => refundPayment(p.transactionId) }
+  );
+
+  // If shipping fails, compensations run automatically in reverse order:
+  // 1. refundPayment, 2. releaseInventory
+  await saga.step(() => deps.scheduleShipping(reservation.id));
+
+  return { reservation, payment };
+});
+```
 
 ### 2. The Neverthrow Approach
 *Explicit, but verbose.*
@@ -93,10 +122,12 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 | **Flow Control** | Linear (Async/Await) | Nested (Callbacks) | Linear (Generators) |
 | **Variable Access**| Easy (Block Scope) | Hard (Closure Scope) | Easy (Block Scope) |
 | **Parallelism** | Good | Good | Excellent (Interruption) |
+| **Saga/Rollback** | Built-in (`createSagaWorkflow`) | Manual | Manual |
+| **Circuit Breaker** | Built-in | Manual | Manual |
 
 ## Conclusion
 
 For **Complex Business Logic (like Checkout)**:
-- **Awaitly** is the winner for **DX**. The automatic error inference and linear async/await syntax match how most developers think about business processes.
-- **Effect** is the winner for **Performance/Safety**. Structured concurrency ensures no wasted resources on failure.
-- **Neverthrow** is solid but gets verbose with complex variable dependencies.
+- **Awaitly** is the winner for **DX** and **Production Reliability**. Automatic error inference, familiar async/await syntax, plus built-in saga pattern for rollback scenarios.
+- **Effect** is the winner for **Structured Concurrency**. If you need fiber-based cancellation and are comfortable with functional programming.
+- **Neverthrow** is solid for simple cases but gets verbose with complex variable dependencies and lacks built-in reliability features.

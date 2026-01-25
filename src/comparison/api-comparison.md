@@ -238,6 +238,107 @@ const user = match(userResult, {
 
 ---
 
+## 7. Circuit Breaker
+
+How do you prevent cascading failures?
+
+### Neverthrow
+Manual implementation required.
+
+### Effect
+Manual implementation or community libraries.
+
+### awaitly
+Built-in `createCircuitBreaker` with presets.
+```typescript
+import { createCircuitBreaker, circuitBreakerPresets } from 'awaitly/circuit-breaker';
+
+const breaker = createCircuitBreaker('api', circuitBreakerPresets.standard);
+
+const result = await breaker.executeResult(() =>
+  step(() => deps.callExternalApi())
+);
+```
+
+---
+
+## 8. Rate Limiting
+
+How do you control throughput?
+
+### Neverthrow
+Manual implementation required.
+
+### Effect
+Manual implementation required.
+
+### awaitly
+Built-in `createRateLimiter` and `createConcurrencyLimiter`.
+```typescript
+import { createRateLimiter, createConcurrencyLimiter } from 'awaitly/ratelimit';
+
+const limiter = createRateLimiter('api', { maxPerSecond: 10 });
+const poolLimiter = createConcurrencyLimiter('db', { maxConcurrent: 5 });
+
+const data = await limiter.execute(() => step(() => deps.callApi()));
+```
+
+---
+
+## 9. Saga / Compensation
+
+How do you handle rollback when multi-step operations fail?
+
+### Neverthrow
+Manual compensation tracking.
+
+### Effect
+Manual via effect handlers.
+
+### awaitly
+Built-in `createSagaWorkflow` with automatic LIFO compensation.
+```typescript
+import { createSagaWorkflow } from 'awaitly/saga';
+
+const saga = createSagaWorkflow({ reserve, charge, ship });
+
+await saga(async (ctx, deps) => {
+  await ctx.step(() => deps.reserve(items), {
+    compensate: (r) => release(r.id)
+  });
+  await ctx.step(() => deps.charge(amount), {
+    compensate: (p) => refund(p.id)
+  });
+  await ctx.step(() => deps.ship(orderId)); // If this fails, compensations run
+});
+```
+
+---
+
+## 10. Policies
+
+How do you apply consistent retry/timeout behavior?
+
+### Neverthrow
+Manual wrappers.
+
+### Effect
+Via `Schedule` composition.
+
+### awaitly
+Built-in policy system with presets.
+```typescript
+import { servicePolicies, withPolicy } from 'awaitly/policies';
+
+const user = await step(
+  () => deps.fetchUser(id),
+  withPolicy(servicePolicies.httpApi, { name: 'fetch-user' })
+);
+// servicePolicies.httpApi = 5s timeout + 3 retries with exponential backoff
+```
+
+---
+
 ## Summary
 
 | Feature | Neverthrow | Effect | Awaitly |
@@ -246,9 +347,14 @@ const user = match(userResult, {
 | **Syntax** | `.andThen().map()` | `yield* Effect...` | `await step(...)` |
 | **Learning Curve** | Low | High | Low |
 | **Inference** | Good | Excellent | Excellent (Auto-unions) |
+| **Circuit Breaker** | Manual | Manual | Built-in |
+| **Rate Limiting** | Manual | Manual | Built-in |
+| **Saga Pattern** | Manual | Manual | Built-in |
+| **Policies** | Manual | Via Schedule | Built-in |
+| **Durable Execution** | Manual | Manual | Built-in |
 | **Ecosystem** | Minimal | Massive | Focused |
 
 **Choose based on:**
-- **Neverthrow:** If you love functional chains and want a lightweight library.
-- **Effect:** If you need a complete runtime system (retries, logging, context) and are willing to learn.
-- **Awaitly:** If you want the safety of Results but the syntax of async/await, plus automatic error inference.
+- **Neverthrow:** If you love functional chains and want a lightweight library for simple error handling.
+- **Effect:** If you need structured concurrency with fibers, sophisticated DI with layers, and are willing to learn.
+- **Awaitly:** If you want production-grade reliability (circuit breakers, rate limiting, sagas, durability) with familiar async/await syntax.

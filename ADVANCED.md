@@ -629,6 +629,361 @@ The workflow automatically computes the union of all possible errors from your d
 
 Add `onEvent` to the workflow options and you get step-by-step events for logging, tracing, and debugging.
 
+**6. Policy-driven configuration**
+
+Apply pre-built policies for common patterns: `withPolicy(servicePolicies.httpApi)` gives you 5-second timeout with 3 retries. Build consistent reliability across your entire codebase.
+
+**7. Production-grade reliability features**
+
+Circuit breakers, rate limiting, saga compensation, durable execution, and human-in-the-loop orchestration are all built-in. No need to implement these patterns yourself.
+
+### Awaitly Advanced Features
+
+Beyond basic workflows, Awaitly provides a comprehensive suite of production-ready features.
+
+#### Durable Execution
+
+Persist workflow state automatically and resume from any point after crashes or deployments:
+
+```typescript
+import { durable } from 'awaitly/durable';
+import { createMemoryStatePersistence } from 'awaitly/persistence';
+
+const store = createMemoryStatePersistence();
+
+const result = await durable.run(
+  { chargeCard, sendReceipt, updateInventory },
+  async (step, deps) => {
+    // Each keyed step is automatically checkpointed
+    const charge = await step(() => deps.chargeCard(payment), {
+      key: 'charge',
+      name: 'Charge card',
+    });
+
+    await step(() => deps.updateInventory(items), {
+      key: 'inventory',
+      name: 'Update inventory',
+    });
+
+    await step(() => deps.sendReceipt(charge), {
+      key: 'receipt',
+      name: 'Send receipt',
+    });
+
+    return { paymentId: charge.id };
+  },
+  {
+    id: `checkout-${orderId}`,
+    store,
+    version: 1, // Increment when workflow logic changes
+  }
+);
+
+if (!result.ok && isWorkflowCancelled(result.error)) {
+  console.log('Workflow cancelled, state saved for resume');
+}
+```
+
+**Key features:**
+- **Automatic checkpointing**: State saved after each keyed step
+- **Crash recovery**: Resume from last completed step on restart
+- **Version management**: Reject resume if workflow logic changed
+- **Concurrency control**: Prevent duplicate executions of the same workflow ID
+
+#### Saga Pattern (Automatic Compensation)
+
+Define compensating actions for rollback when downstream steps fail:
+
+```typescript
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+
+const checkout = createSagaWorkflow({
+  reserveInventory,
+  chargeCard,
+  scheduleShipping,
+});
+
+const result = await checkout(async (saga, deps) => {
+  // Step 1: Reserve inventory (with compensation)
+  const reservation = await saga.step(
+    () => deps.reserveInventory(items),
+    {
+      name: 'Reserve inventory',
+      compensate: (res) => releaseInventory(res.reservationId),
+    }
+  );
+
+  // Step 2: Charge card (with compensation)
+  const payment = await saga.step(
+    () => deps.chargeCard(amount),
+    {
+      name: 'Charge card',
+      compensate: (p) => refundPayment(p.transactionId),
+    }
+  );
+
+  // Step 3: Schedule shipping (no compensation needed)
+  await saga.step(() => deps.scheduleShipping(reservation.id), {
+    name: 'Schedule shipping',
+  });
+
+  return { reservation, payment };
+});
+
+// If step 3 fails, compensations run in LIFO order:
+// 1. refundPayment (step 2)
+// 2. releaseInventory (step 1)
+
+if (!result.ok && isSagaCompensationError(result.error)) {
+  console.log('Saga failed, compensations executed:', result.error.compensationErrors);
+}
+```
+
+**Key features:**
+- **LIFO compensation**: Compensations run in reverse order automatically
+- **`saga.step`**: Execute Result-returning operations with optional compensation
+- **`saga.tryStep`**: Execute throwing operations with error mapping
+- **Compensation error tracking**: Know which compensations failed and why
+
+#### Circuit Breaker
+
+Prevent cascading failures with built-in circuit breaker:
+
+```typescript
+import {
+  createCircuitBreaker,
+  circuitBreakerPresets,
+  isCircuitOpenError,
+} from 'awaitly/circuit-breaker';
+
+// Use presets for common scenarios
+const paymentBreaker = createCircuitBreaker(
+  'payment-provider',
+  circuitBreakerPresets.critical // Opens after 3 failures, 60s reset
+);
+
+// Or customize
+const apiBreaker = createCircuitBreaker('external-api', {
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  windowSize: 60000,
+  halfOpenMax: 3,
+  onStateChange: (from, to, name) => {
+    console.log(`Circuit ${name}: ${from} -> ${to}`);
+  },
+});
+
+// In workflow
+const result = await workflow(async (step, deps) => {
+  // executeResult returns a Result, no exceptions
+  const data = await paymentBreaker.executeResult(() =>
+    step(() => deps.chargeCard(payment))
+  );
+
+  if (!data.ok && isCircuitOpenError(data.error)) {
+    // Circuit is open, fail fast
+    console.log(`Retry after ${data.error.retryAfterMs}ms`);
+    return err(new ProviderUnavailable('Circuit open'));
+  }
+
+  return data;
+});
+```
+
+**Presets available:**
+- `critical`: Opens quickly (3 failures), recovers slowly (60s)
+- `standard`: Balanced (5 failures, 30s reset)
+- `lenient`: Opens slowly (10 failures), recovers quickly (15s)
+
+#### Rate Limiting
+
+Control throughput for rate-limited APIs or shared resources:
+
+```typescript
+import {
+  createRateLimiter,
+  createConcurrencyLimiter,
+  createCombinedLimiter,
+} from 'awaitly/ratelimit';
+
+// Rate limiting (requests per second)
+const apiLimiter = createRateLimiter('stripe-api', {
+  maxPerSecond: 10,
+  burstCapacity: 20, // Allow brief spikes
+  strategy: 'wait', // Wait for slot (vs 'reject')
+});
+
+// Concurrency limiting (max concurrent)
+const dbLimiter = createConcurrencyLimiter('db-pool', {
+  maxConcurrent: 5,
+  strategy: 'queue', // Queue requests (vs 'reject')
+  maxQueueSize: 100,
+});
+
+// Combined for both rate + concurrency control
+const limiter = createCombinedLimiter('api', {
+  rate: { maxPerSecond: 10 },
+  concurrency: { maxConcurrent: 5 },
+});
+
+// Usage in workflow
+const result = await workflow(async (step, deps) => {
+  // Rate-limited API call
+  const data = await apiLimiter.execute(() =>
+    step(() => deps.callExternalApi())
+  );
+
+  // Batch with concurrency control
+  const results = await dbLimiter.executeAll(
+    ids.map((id) => () => step(() => deps.fetchItem(id)))
+  );
+
+  return { data, results };
+});
+```
+
+#### Policies
+
+Reusable bundles of retry, timeout, and other step options:
+
+```typescript
+import {
+  servicePolicies,
+  retryPolicies,
+  timeoutPolicies,
+  withPolicy,
+  createPolicyRegistry,
+} from 'awaitly/policies';
+
+// Pre-built service policies
+// servicePolicies.httpApi: 5s timeout, 3 retries with exponential backoff
+// servicePolicies.database: 30s timeout, 2 retries
+// servicePolicies.cache: 1s timeout, no retry
+// servicePolicies.messageQueue: 30s timeout, 5 retries
+
+// Inline policy application
+const user = await step(
+  () => deps.fetchUser(id),
+  withPolicy(servicePolicies.httpApi, { name: 'fetch-user', key: `user:${id}` })
+);
+
+// Policy registry for org-wide standards
+const registry = createPolicyRegistry();
+registry.register('api', servicePolicies.httpApi);
+registry.register('db', servicePolicies.database);
+registry.register('cache', servicePolicies.cache);
+
+// Use from registry
+const data = await step(
+  () => deps.queryDatabase(query),
+  registry.apply('db', { name: 'query-users' })
+);
+
+// Compose policies
+import { mergePolicies } from 'awaitly/policies';
+
+const customPolicy = mergePolicies(
+  timeoutPolicies.api, // 5s timeout
+  retryPolicies.aggressive, // 5 attempts
+  { name: 'critical-call' }
+);
+```
+
+#### Singleflight (Request Coalescing)
+
+Deduplicate concurrent identical requests:
+
+```typescript
+import { singleflight } from 'awaitly/singleflight';
+
+const fetchUserOnce = singleflight(fetchUser, {
+  key: (id) => `user:${id}`,
+  ttl: 5000, // Cache successful results for 5 seconds
+});
+
+// All concurrent calls share one request
+const [user1, user2, user3] = await Promise.all([
+  fetchUserOnce('1'), // Triggers fetch
+  fetchUserOnce('1'), // Joins existing fetch
+  fetchUserOnce('2'), // Different key - new fetch
+]);
+
+// After TTL expires, next call triggers fresh fetch
+```
+
+**Use cases:**
+- Prevent thundering herd on cache miss
+- Deduplicate API calls during page load
+- Share expensive computations across callers
+
+#### Human-in-the-Loop (HITL)
+
+Pause workflows for human approval and resume after:
+
+```typescript
+import {
+  createHITLOrchestrator,
+  createMemoryApprovalStore,
+  createMemoryWorkflowStateStore,
+  createApprovalStep,
+} from 'awaitly/hitl';
+
+const orchestrator = createHITLOrchestrator({
+  approvalStore: createMemoryApprovalStore(),
+  workflowStateStore: createMemoryWorkflowStateStore(),
+  notificationChannel: {
+    onApprovalNeeded: async (ctx) => {
+      await sendSlackMessage(`Approval needed: ${ctx.reason}`);
+    },
+  },
+});
+
+// Create approval step factory
+const requireManagerApproval = createApprovalStep<{ approvedBy: string }>({
+  key: (orderId) => `order-approval:${orderId}`,
+  checkApproval: createApprovalChecker(orchestrator.approvalStore),
+  pendingReason: 'Waiting for manager approval',
+});
+
+// Execute workflow
+const result = await orchestrator.execute(
+  'high-value-order',
+  ({ resumeState, onEvent }) =>
+    createWorkflow(deps, { resumeState, onEvent }),
+  async (step, deps, input) => {
+    const order = await step(() => deps.createOrder(input));
+
+    // Pause for approval if order > $10,000
+    if (order.total > 10000) {
+      const approval = await requireManagerApproval(step, order.id);
+      await step(() => deps.logApproval(order.id, approval.approvedBy));
+    }
+
+    await step(() => deps.processOrder(order.id));
+    return { orderId: order.id };
+  },
+  { items: [...], total: 15000 }
+);
+
+if (result.status === 'paused') {
+  console.log(`Waiting for: ${result.pendingApprovals}`);
+  // Workflow state is persisted, can resume later
+}
+
+// Later, when manager approves via webhook or UI:
+await orchestrator.grantApproval(
+  `order-approval:${orderId}`,
+  { approvedBy: 'manager@example.com' },
+  { autoResume: true } // Automatically resume waiting workflows
+);
+```
+
+**Key features:**
+- **Workflow pausing**: Workflows pause at approval steps and resume after
+- **State persistence**: Workflow state saved automatically when paused
+- **Notification channels**: Integrate with Slack, email, or custom UIs
+- **Webhook handlers**: Built-in handlers for approval/rejection endpoints
+
 ### Approach 4: The Architect (Effect)
 
 ```typescript
@@ -885,6 +1240,11 @@ Think of yourself as a conductor leading an orchestra. You don't play every inst
 
 - **The Score**: Your workflow function is the sheet music
 - **The Musicians**: Dependencies are injected and called via `step()`
+- **House Rules (Policies)**: Timeouts, retries, and rate limits are established before the performance
+- **Skip Failing Sections (Circuit Breakers)**: If a section keeps failing, temporarily skip it
+- **Control Section Tempo (Rate Limiting)**: Ensure sections don't play too fast for the venue
+- **Pause for Conductor's Signal (HITL)**: Wait for approval before critical movements
+- **Undo Movements (Saga Compensations)**: If the finale fails, undo earlier movements in reverse
 - **Early Exit**: If any musician misses their cue (error), the performance stops
 - **Caching**: You can mark certain passages to avoid repeating them
 - **Resume**: If the concert is interrupted, you can restart from the last completed movement
@@ -901,6 +1261,29 @@ workflow(async (step, deps) => {
 **Why this model works:**
 
 It combines the familiarity of async/await with the safety of Result types. You write code that looks like standard JavaScript, but errors are tracked, retries are built-in, and the workflow is resumable.
+
+**The full orchestra:**
+
+When you need production-grade reliability, the conductor has access to a full ensemble of tools:
+
+```typescript
+// The full orchestra
+const saga = createSagaWorkflow(deps); // Automatic compensation
+const breaker = createCircuitBreaker('api'); // Fail-fast protection
+const limiter = createRateLimiter('api', { maxPerSecond: 10 }); // Tempo control
+
+await saga(async (saga, deps) => {
+  // Rate-limited, circuit-protected, compensating steps
+  const data = await limiter.execute(() =>
+    breaker.executeResult(() =>
+      saga.step(() => deps.callApi(), {
+        compensate: (d) => deps.rollback(d.id),
+      })
+    )
+  );
+  return data;
+});
+```
 
 ### Effect: The Blueprint Model
 
@@ -1282,6 +1665,204 @@ describe('awaitly payment processing', () => {
 });
 ```
 
+#### Testing Saga Compensation
+
+```typescript
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+
+describe('saga compensation', () => {
+  it('should run compensations in LIFO order on failure', async () => {
+    const compensationOrder: string[] = [];
+
+    const saga = createSagaWorkflow({
+      step1: () => Promise.resolve(ok({ id: '1' })),
+      step2: () => Promise.resolve(ok({ id: '2' })),
+      step3: () => Promise.resolve(err(new Error('Step 3 failed'))),
+    });
+
+    const result = await saga(async (ctx, deps) => {
+      await ctx.step(() => deps.step1(), {
+        compensate: () => { compensationOrder.push('step1'); },
+      });
+      await ctx.step(() => deps.step2(), {
+        compensate: () => { compensationOrder.push('step2'); },
+      });
+      await ctx.step(() => deps.step3()); // This fails
+      return 'done';
+    });
+
+    expect(result.ok).toBe(false);
+    // Compensations run in reverse order
+    expect(compensationOrder).toEqual(['step2', 'step1']);
+  });
+
+  it('should track compensation failures', async () => {
+    const saga = createSagaWorkflow({ step1: () => ok({}), step2: () => err(new Error('fail')) });
+
+    const result = await saga(async (ctx, deps) => {
+      await ctx.step(() => deps.step1(), {
+        compensate: () => { throw new Error('Compensation failed'); },
+      });
+      await ctx.step(() => deps.step2());
+      return 'done';
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && isSagaCompensationError(result.error)) {
+      expect(result.error.compensationErrors.length).toBe(1);
+    }
+  });
+});
+```
+
+#### Testing Durable Execution
+
+```typescript
+import { durable, isWorkflowCancelled } from 'awaitly/durable';
+import { createMemoryStatePersistence } from 'awaitly/persistence';
+
+describe('durable execution', () => {
+  it('should resume from last completed step', async () => {
+    const store = createMemoryStatePersistence();
+    const callCounts = { step1: 0, step2: 0 };
+
+    // First run: complete step1, then "crash"
+    const controller = new AbortController();
+    const result1 = await durable.run(
+      {
+        step1: () => { callCounts.step1++; return ok({ id: '1' }); },
+        step2: () => {
+          controller.abort(); // Simulate crash
+          return ok({ id: '2' });
+        },
+      },
+      async (step, deps) => {
+        await step(() => deps.step1(), { key: 'step1' });
+        await step(() => deps.step2(), { key: 'step2' });
+        return 'done';
+      },
+      { id: 'test-workflow', store, signal: controller.signal }
+    );
+
+    expect(isWorkflowCancelled(result1.error)).toBe(true);
+    expect(callCounts.step1).toBe(1);
+
+    // Resume: step1 should be skipped
+    const result2 = await durable.run(
+      {
+        step1: () => { callCounts.step1++; return ok({ id: '1' }); },
+        step2: () => { callCounts.step2++; return ok({ id: '2' }); },
+      },
+      async (step, deps) => {
+        await step(() => deps.step1(), { key: 'step1' });
+        await step(() => deps.step2(), { key: 'step2' });
+        return 'done';
+      },
+      { id: 'test-workflow', store }
+    );
+
+    expect(result2.ok).toBe(true);
+    expect(callCounts.step1).toBe(1); // Not called again
+    expect(callCounts.step2).toBe(1);
+  });
+});
+```
+
+#### Testing Circuit Breaker
+
+```typescript
+import { createCircuitBreaker, isCircuitOpenError } from 'awaitly/circuit-breaker';
+
+describe('circuit breaker', () => {
+  it('should open after threshold failures', async () => {
+    const breaker = createCircuitBreaker('test', {
+      failureThreshold: 3,
+      resetTimeout: 1000,
+    });
+
+    // Fail 3 times to open the circuit
+    for (let i = 0; i < 3; i++) {
+      await breaker.executeResult(() => err(new Error('fail')));
+    }
+
+    expect(breaker.getState()).toBe('OPEN');
+
+    // Next call should fail with CircuitOpenError
+    const result = await breaker.executeResult(() => ok('success'));
+    expect(result.ok).toBe(false);
+    expect(isCircuitOpenError(result.error)).toBe(true);
+  });
+
+  it('should transition to HALF_OPEN after reset timeout', async () => {
+    const breaker = createCircuitBreaker('test', {
+      failureThreshold: 1,
+      resetTimeout: 50, // 50ms for fast test
+    });
+
+    await breaker.executeResult(() => err(new Error('fail')));
+    expect(breaker.getState()).toBe('OPEN');
+
+    await new Promise((r) => setTimeout(r, 60));
+    // Trigger state check
+    await breaker.executeResult(() => ok('success'));
+    expect(breaker.getState()).toBe('CLOSED');
+  });
+});
+```
+
+#### Testing HITL Approvals
+
+```typescript
+import {
+  createHITLOrchestrator,
+  createMemoryApprovalStore,
+  createMemoryWorkflowStateStore,
+} from 'awaitly/hitl';
+
+describe('human-in-the-loop', () => {
+  it('should pause workflow at approval step', async () => {
+    const orchestrator = createHITLOrchestrator({
+      approvalStore: createMemoryApprovalStore(),
+      workflowStateStore: createMemoryWorkflowStateStore(),
+    });
+
+    const result = await orchestrator.execute(
+      'test-workflow',
+      ({ resumeState, onEvent }) => createWorkflow(deps, { resumeState, onEvent }),
+      async (step, deps, input) => {
+        await step(() => deps.createOrder(input));
+        // This step will pause for approval
+        await step(() => pendingApproval('Needs manager approval'));
+        return 'completed';
+      },
+      { orderId: '123' }
+    );
+
+    expect(result.status).toBe('paused');
+    expect(result.pendingApprovals.length).toBeGreaterThan(0);
+  });
+
+  it('should resume after approval granted', async () => {
+    const approvalStore = createMemoryApprovalStore();
+    const orchestrator = createHITLOrchestrator({
+      approvalStore,
+      workflowStateStore: createMemoryWorkflowStateStore(),
+    });
+
+    // Execute and pause
+    const paused = await orchestrator.execute(/* ... */);
+    const approvalKey = paused.pendingApprovals[0];
+
+    // Grant approval
+    await orchestrator.grantApproval(approvalKey, { approvedBy: 'manager' });
+
+    // Resume
+    const resumed = await orchestrator.resume(paused.runId, /* ... */);
+    expect(resumed.status).toBe('completed');
+  });
+});
+```
+
 **Benefits of this approach:**
 
 **1. Uniform test structure (like neverthrow)**
@@ -1358,6 +1939,38 @@ Your test implementations are just objects. No magic, no setup, no teardown.
 **4. Predictable test execution without side effects**
 
 Effects are descriptions of work, not the work itself. You can inspect, modify, and test them without running side effects.
+
+### Feature Comparison: Awaitly vs Effect
+
+Both Awaitly and Effect provide production-grade reliability features, but with different philosophies:
+
+| Feature | Awaitly | Effect |
+|---------|---------|--------|
+| **Syntax** | async/await + `step()` | Functional composition with generators |
+| **Learning curve** | Familiar to JS developers | Requires functional programming knowledge |
+| **Saga Pattern** | `createSagaWorkflow` (first-class) | Manual via effect handlers |
+| **Durable Execution** | `durable.run` (built-in) | Custom persistence adapters |
+| **Circuit Breaker** | `createCircuitBreaker` with presets | Custom implementation required |
+| **Rate Limiting** | `createRateLimiter`, `createConcurrencyLimiter` | Custom implementation required |
+| **Policies** | `servicePolicies` + registry | Via `Schedule` |
+| **Human-in-the-Loop** | `createHITLOrchestrator` (built-in) | Custom implementation required |
+| **Singleflight** | `singleflight()` with TTL caching | Custom implementation required |
+| **Dependency Injection** | Dependencies object to workflow | Layers and Context |
+| **Structured Concurrency** | Via `step.parallel()` | Built-in with fibers |
+| **Observability** | `onEvent` callback | Built-in tracing and metrics |
+| **Bundle Size** | ~8-15KB (tree-shakeable) | ~50KB+ |
+
+**When to choose Awaitly:**
+- Team familiar with async/await, less with FP
+- Need production reliability features out of the box
+- Want saga pattern and HITL without custom code
+- Bundle size matters but you need more than neverthrow
+
+**When to choose Effect:**
+- Team comfortable with functional programming
+- Need sophisticated dependency injection with layers
+- Want structured concurrency with fiber semantics
+- Building complex domain models with type-safe errors
 
 ## Performance Considerations
 
@@ -1514,21 +2127,36 @@ function circuitBreakerResult<T, E extends Error>(
   };
 }
 
-// Awaitly: Built-in circuit breaker
-import { createCircuitBreaker } from 'awaitly/circuit-breaker';
+// Awaitly: Built-in circuit breaker with presets
+import {
+  createCircuitBreaker,
+  circuitBreakerPresets,
+  isCircuitOpenError,
+} from 'awaitly/circuit-breaker';
 
-const breaker = createCircuitBreaker({
+// Use presets for common scenarios
+const breaker = createCircuitBreaker('external-api', circuitBreakerPresets.standard);
+
+// Or customize
+const customBreaker = createCircuitBreaker('payment-api', {
   failureThreshold: 5,
   resetTimeout: 60000,
-  halfOpenRequests: 1,
+  windowSize: 60000,
+  halfOpenMax: 3,
+  onStateChange: (from, to, name) => console.log(`${name}: ${from} -> ${to}`),
 });
 
 const result = await workflow(async (step, deps) => {
-  return await step.withCircuitBreaker(
-    () => deps.callExternalService(),
-    breaker,
-    { name: 'External service call' }
+  // executeResult returns a Result, integrates cleanly with workflows
+  const data = await breaker.executeResult(() =>
+    step(() => deps.callExternalService())
   );
+
+  if (!data.ok && isCircuitOpenError(data.error)) {
+    return err(new ServiceUnavailable(`Retry after ${data.error.retryAfterMs}ms`));
+  }
+
+  return data;
 });
 
 // Effect: Built-in circuit breaker policy
@@ -1650,45 +2278,50 @@ function processOrderWithCompensation(
     .orElse((error) => runCompensations().andThen(() => errAsync(error)));
 }
 
-// Awaitly: Imperative compensation with step caching
-const processOrderAwaitly = createWorkflow({
+// Awaitly: Built-in saga pattern with automatic compensation
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+
+const processOrderSaga = createSagaWorkflow({
   processPayment,
   reserveInventory,
   scheduleShipping,
-  refundPayment,
-  unreserveInventory,
 });
 
-const result = await processOrderAwaitly(async (step, deps) => {
-  const compensations: (() => Promise<void>)[] = [];
-
-  try {
-    // Step 1: Process payment
-    const payment = await step(() => deps.processPayment(order.payment), {
-      key: `payment:${order.id}`,
-    });
-    compensations.push(() => deps.refundPayment(payment.id));
-
-    // Step 2: Reserve inventory
-    await step(() => deps.reserveInventory(order.items), {
-      key: `inventory:${order.id}`,
-    });
-    compensations.push(() => deps.unreserveInventory(order.items));
-
-    // Step 3: Schedule shipping
-    await step(() => deps.scheduleShipping(order), {
-      key: `shipping:${order.id}`,
-    });
-
-    return { success: true, orderId: order.id };
-  } catch (error) {
-    // Run compensations in reverse order
-    for (const compensate of compensations.reverse()) {
-      await compensate().catch(() => {}); // Best effort
+const result = await processOrderSaga(async (saga, deps) => {
+  // Step 1: Process payment (with compensation)
+  const payment = await saga.step(
+    () => deps.processPayment(order.payment),
+    {
+      name: 'Process payment',
+      compensate: (p) => refundPayment(p.id), // Runs on rollback
     }
-    throw error;
-  }
+  );
+
+  // Step 2: Reserve inventory (with compensation)
+  await saga.step(
+    () => deps.reserveInventory(order.items),
+    {
+      name: 'Reserve inventory',
+      compensate: () => unreserveInventory(order.items),
+    }
+  );
+
+  // Step 3: Schedule shipping (no compensation needed)
+  await saga.step(() => deps.scheduleShipping(order), {
+    name: 'Schedule shipping',
+  });
+
+  return { success: true, orderId: order.id };
 });
+
+// If step 3 fails, compensations run automatically in LIFO order:
+// 1. unreserveInventory (step 2)
+// 2. refundPayment (step 1)
+
+if (!result.ok && isSagaCompensationError(result.error)) {
+  console.log('Original error:', result.error.originalError);
+  console.log('Compensation failures:', result.error.compensationErrors);
+}
 
 // Effect: STM (Software Transactional Memory)
 const processOrderWithSTM = (order: Order) =>
@@ -1707,6 +2340,89 @@ const processOrderWithSTM = (order: Order) =>
 **Why compensation patterns matter:**
 
 Distributed transactions are hard. When you can't rely on database transactions, you need explicit compensation logic to maintain consistency.
+
+### Rate Limiting Patterns
+
+When calling rate-limited APIs or protecting shared resources:
+
+```typescript
+// try/catch: Manual token bucket
+class RateLimiter {
+  private tokens: number;
+  private lastRefill: number;
+
+  constructor(private maxPerSecond: number) {
+    this.tokens = maxPerSecond;
+    this.lastRefill = Date.now();
+  }
+
+  async acquire(): Promise<void> {
+    this.refill();
+    if (this.tokens <= 0) {
+      const waitTime = 1000 / this.maxPerSecond;
+      await new Promise((r) => setTimeout(r, waitTime));
+      return this.acquire();
+    }
+    this.tokens--;
+  }
+
+  private refill() {
+    const now = Date.now();
+    const elapsed = now - this.lastRefill;
+    this.tokens = Math.min(
+      this.maxPerSecond,
+      this.tokens + (elapsed / 1000) * this.maxPerSecond
+    );
+    this.lastRefill = now;
+  }
+}
+
+// Awaitly: Built-in rate limiting with multiple strategies
+import {
+  createRateLimiter,
+  createConcurrencyLimiter,
+  createCombinedLimiter,
+} from 'awaitly/ratelimit';
+
+// Rate limiting: requests per second
+const apiLimiter = createRateLimiter('stripe-api', {
+  maxPerSecond: 10,
+  burstCapacity: 20,
+  strategy: 'wait', // Queue requests when limit hit
+});
+
+// Concurrency limiting: max parallel
+const dbLimiter = createConcurrencyLimiter('db-pool', {
+  maxConcurrent: 5,
+  strategy: 'queue',
+  maxQueueSize: 100,
+});
+
+// Combined for both
+const limiter = createCombinedLimiter('api', {
+  rate: { maxPerSecond: 10 },
+  concurrency: { maxConcurrent: 5 },
+});
+
+// Usage
+const result = await workflow(async (step, deps) => {
+  // Rate-limited call
+  const data = await apiLimiter.execute(() =>
+    step(() => deps.callApi())
+  );
+
+  // Batch with concurrency control
+  const items = await dbLimiter.executeAll(
+    ids.map((id) => () => step(() => deps.fetchItem(id)))
+  );
+
+  return { data, items };
+});
+```
+
+**Why rate limiting matters:**
+
+External APIs have rate limits. Database connections are finite. Without explicit control, you'll hit limits at the worst times—usually during traffic spikes when you need reliability most.
 
 ## Production Battle Stories
 
@@ -1781,6 +2497,60 @@ They adopted Awaitly with step caching and resume state:
 **The Result**
 
 Zero duplicate processing. Crash recovery went from "restart everything" to "resume from last checkpoint" in under a minute.
+
+### Story 5: The Approval Workflow That Needed to Pause
+
+**The Problem**
+
+A compliance team needed multi-level approval for high-value transactions: manager approval for orders over $10K, VP approval for orders over $100K. Their existing system used polling and manual status checks, leading to missed SLAs and audit gaps.
+
+**The Solution**
+
+They implemented Awaitly's Human-in-the-Loop orchestration:
+
+```typescript
+import { createHITLOrchestrator, createApprovalStep } from 'awaitly/hitl';
+
+const orchestrator = createHITLOrchestrator({
+  approvalStore: redisApprovalStore,
+  workflowStateStore: postgresStateStore,
+  notificationChannel: {
+    onApprovalNeeded: async (ctx) => {
+      await slack.postMessage({
+        channel: '#approvals',
+        text: `Order ${ctx.metadata.orderId} needs ${ctx.reason}`,
+        attachments: [{ actions: [approveButton, rejectButton] }],
+      });
+    },
+  },
+});
+
+const processHighValueOrder = async (order) => {
+  return orchestrator.execute('high-value-order', workflowFactory, async (step, deps, input) => {
+    const validated = await step(() => deps.validateOrder(input));
+
+    if (validated.total > 100000) {
+      await step(() => pendingApproval('VP approval required'), {
+        key: `vp-approval:${input.orderId}`,
+      });
+    } else if (validated.total > 10000) {
+      await step(() => pendingApproval('Manager approval required'), {
+        key: `manager-approval:${input.orderId}`,
+      });
+    }
+
+    await step(() => deps.processPayment(validated));
+    return { orderId: input.orderId, status: 'completed' };
+  }, order);
+};
+```
+
+**The Result**
+
+- 99% SLA compliance (approvals completed within target time)
+- Complete audit trail with timestamps, approvers, and decision history
+- Slack integration meant approvers could approve from mobile
+- Workflow state persisted across deployments and restarts
 
 ## The Final Word
 

@@ -71,20 +71,68 @@ Effect is designed for this. It treats retries, timeouts, and concurrency limits
 - **Resume State:** Resume functionality would require custom implementation.
 - **Overkill:** Might be too much "machinery" for a simple script.
 
+### 4. Awaitly Advanced Features
+
+Awaitly now provides the same production-grade reliability features as Effect, with familiar syntax:
+
+```typescript
+import { durable } from 'awaitly/durable';
+import { createCircuitBreaker, circuitBreakerPresets } from 'awaitly/circuit-breaker';
+import { createRateLimiter } from 'awaitly/ratelimit';
+import { servicePolicies, withPolicy } from 'awaitly/policies';
+
+// Circuit breaker for flaky APIs
+const apiBreaker = createCircuitBreaker('external-api', circuitBreakerPresets.standard);
+
+// Rate limiting for external services
+const rateLimiter = createRateLimiter('api', { maxPerSecond: 10 });
+
+// Durable execution with automatic resume
+const result = await durable.run(
+  { fetchUser, fetchPosts, fetchComments },
+  async (step, deps) => {
+    const user = await step(
+      () => deps.fetchUser(userId),
+      withPolicy(servicePolicies.httpApi, { key: `user:${userId}` })
+    );
+
+    // Rate-limited + circuit-protected API call
+    const posts = await rateLimiter.execute(() =>
+      apiBreaker.executeResult(() =>
+        step(() => deps.fetchPosts(user.id), { key: `posts:${user.id}` })
+      )
+    );
+
+    return { user, posts };
+  },
+  { id: `pipeline-${userId}`, store, version: 1 }
+);
+```
+
+**Pros:**
+- **Built-in Policies:** `servicePolicies.httpApi`, `retryPolicies`, `timeoutPolicies`
+- **Circuit Breakers:** `createCircuitBreaker` with presets (critical/standard/lenient)
+- **Rate Limiting:** `createRateLimiter`, `createConcurrencyLimiter`
+- **Durable Execution:** `durable.run` with automatic checkpointing and resume
+- **Familiar Syntax:** Still async/await, no new paradigm to learn
+
 ## Comparison Table
 
 | Feature | Awaitly | Neverthrow | Effect |
 | :--- | :--- | :--- | :--- |
-| **Caching** | Built-in (`key` param) | Manual implementation | Via Request Cache service / manual wiring |
-| **Resume State** | Built-in (`resumeState`) | Manual implementation | Manual implementation |
-| **Observability** | Built-in (`onEvent`) | Manual implementation | Runtime tracing / logging (needs configuration) |
-| **Parallelism** | `allAsync()` | `ResultAsync.combine()` | `Effect.all()` |
+| **Caching** | Built-in (`key` param) | Manual implementation | Via Request Cache service |
+| **Resume State** | Built-in (`resumeState`, `durable.run`) | Manual implementation | Manual implementation |
+| **Observability** | Built-in (`onEvent`) | Manual implementation | Runtime tracing / logging |
+| **Circuit Breaker** | Built-in (`createCircuitBreaker`) | Manual implementation | Manual implementation |
+| **Rate Limiting** | Built-in (`createRateLimiter`) | Manual implementation | Manual implementation |
+| **Policies** | Built-in (`servicePolicies`) | Manual implementation | Via `Schedule` |
+| **Parallelism** | `allAsync()`, `step.parallel()` | `ResultAsync.combine()` | `Effect.all()` |
 | **Syntax** | Async/Await | Method Chaining | Generator (`yield*`) |
 | **Readability** | High | Medium (Nesting) | High (Once learned) |
 
 ## Conclusion
 
 For **Data Pipelines**:
-- **Effect** is the most robust choice if you need complex policies (circuit breakers, rate limiting, retries) and are willing to wire the runtime services you need.
-- **Awaitly** is the pragmatic choice. It gives you caching, resume state, and observability with zero boilerplate and familiar syntax.
-- **Neverthrow** struggles here without extra utility libraries for caching and resume functionality.
+- **Awaitly** now matches Effect's feature set for reliability (circuit breakers, rate limiting, policies, durable execution) while maintaining familiar async/await syntax. It's the best choice for teams that want production-grade reliability without learning a new paradigm.
+- **Effect** remains powerful if you need structured concurrency with fiber semantics and are comfortable with functional programming.
+- **Neverthrow** struggles here without extra utility libraries for caching, resume, and reliability features.
