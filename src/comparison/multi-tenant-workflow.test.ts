@@ -182,8 +182,8 @@ export async function multiTenantWorkflow(
   });
 
   return workflow(async (step) => {
-    const tenant = await step(() => fetchTenant(tenantId), {
-      name: 'Fetch tenant',
+    const tenant = await step('fetchTenant', () => fetchTenant(tenantId), {
+      description: 'Fetch tenant',
       key: `tenant:${tenantId}`,
     });
 
@@ -199,23 +199,24 @@ export async function multiTenantWorkflow(
       );
 
       const usage = await step(
+        'calculateUsage',
         () => calculateUsage(tenant, users, resources),
         {
-          name: 'Calculate usage',
+          description: 'Calculate usage',
           key: `usage:${tenantId}`,
         }
       );
 
       switch (tenant.plan) {
         case 'pro':
-          await step(() => sendBillingNotification(tenant, usage), {
-            name: 'Send pro billing notification',
+          await step('sendBillingNotification', () => sendBillingNotification(tenant, usage), {
+            description: 'Send pro billing notification',
             key: `notify:${tenantId}:pro`,
           });
           break;
         case 'enterprise':
-          await step(() => sendBillingNotification(tenant, usage), {
-            name: 'Send enterprise billing notification',
+          await step('sendBillingNotification', () => sendBillingNotification(tenant, usage), {
+            description: 'Send enterprise billing notification',
             key: `notify:${tenantId}:enterprise`,
           });
           break;
@@ -226,13 +227,14 @@ export async function multiTenantWorkflow(
       return usage;
     } else {
       const usage = await step(
+        'calculateUsageFree',
         () => calculateUsage(tenant, [], []),
         {
-          name: 'Calculate usage (free plan)',
+          description: 'Calculate usage (free plan)',
           key: `usage:${tenantId}:free`,
         }
       );
-      
+
       return usage;
     }
   });

@@ -65,8 +65,8 @@ import { createWorkflow } from 'awaitly/workflow';
 const loadUserData = createWorkflow({ fetchUser, fetchPosts });
 
 const result = await loadUserData(async (step, deps) => {
-  const user = await step(() => deps.fetchUser('1'));
-  const posts = await step(() => deps.fetchPosts(user.id));
+  const user = await step('getUser', () => deps.fetchUser('1'));
+  const posts = await step('getPosts', () => deps.fetchPosts(user.id));
   return { user, posts };
 });
 ```
@@ -142,10 +142,7 @@ Effect.tryPromise({
 ### awaitly
 `step.try()`.
 ```typescript
-await step.try(
-  () => api.call(),
-  { error: 'API_ERROR' }
-)
+await step.try('apiCall', () => api.call(), { error: 'API_ERROR' });
 ```
 
 ---
@@ -173,13 +170,13 @@ import { allAsync, isPromiseRejectedError } from 'awaitly';
 
 // For dynamic arrays, use step.fromResult with error handling
 const results = await step.fromResult(
+  'processItems',
   () => allAsync(items.map(item => deps.processItem(item))),
   {
     onError: (error): ProcessError => {
       if (isPromiseRejectedError(error)) return 'PROCESS_FAILED';
       return error;
     },
-    name: 'Process items'
   }
 );
 
@@ -225,7 +222,7 @@ const result = await workflow(async (step, deps) => {
   }
   
   // Unwrap and continue
-  return await step(userResult);
+  return await step('getUser', () => userResult);
 });
 
 // Or use match() helper
@@ -256,7 +253,7 @@ import { createCircuitBreaker, circuitBreakerPresets } from 'awaitly/circuit-bre
 const breaker = createCircuitBreaker('api', circuitBreakerPresets.standard);
 
 const result = await breaker.executeResult(() =>
-  step(() => deps.callExternalApi())
+  step('callApi', () => deps.callExternalApi())
 );
 ```
 
@@ -280,7 +277,7 @@ import { createRateLimiter, createConcurrencyLimiter } from 'awaitly/ratelimit';
 const limiter = createRateLimiter('api', { maxPerSecond: 10 });
 const poolLimiter = createConcurrencyLimiter('db', { maxConcurrent: 5 });
 
-const data = await limiter.execute(() => step(() => deps.callApi()));
+const data = await limiter.execute(() => step('callApi', () => deps.callApi()));
 ```
 
 ---
@@ -331,10 +328,125 @@ Built-in policy system with presets.
 import { servicePolicies, withPolicy } from 'awaitly/policies';
 
 const user = await step(
+  'fetchUser',
   () => deps.fetchUser(id),
-  withPolicy(servicePolicies.httpApi, { name: 'fetch-user' })
+  withPolicy(servicePolicies.httpApi, { description: 'fetch-user' })
 );
 // servicePolicies.httpApi = 5s timeout + 3 retries with exponential backoff
+```
+
+---
+
+---
+
+## 11. Streaming Comparison
+
+How do you process data streams with Result types?
+
+### Neverthrow
+Manual implementation with Node.js streams or async iterators.
+
+### Effect
+Effect Stream provides powerful stream processing:
+```typescript
+import { Stream, Effect } from 'effect';
+
+const processed = Stream.fromIterable(data).pipe(
+  Stream.map((item) => item.toUpperCase()),
+  Stream.filter((item) => item.length > 0),
+  Stream.runCollect
+);
+```
+
+### Awaitly
+`awaitly/streaming` provides Result-aware stream transformers:
+```typescript
+import { map, filter, collect } from 'awaitly/streaming';
+
+const processed = readable
+  .pipeThrough(map((item) => ok(item.toUpperCase())))
+  .pipeThrough(filter((item) => item.length > 0));
+
+const results = await step('collect', () => collect(processed));
+```
+
+---
+
+## 12. Functional Composition Comparison
+
+How do you compose functions in a pipeline?
+
+### Neverthrow
+Uses method chaining:
+```typescript
+validateUser(data)
+  .map((user) => enrichUser(user))
+  .andThen((user) => saveUser(user))
+  .mapErr((e) => new ApiError(e));
+```
+
+### Effect
+Uses `pipe` and `Effect.map/flatMap`:
+```typescript
+import { pipe, Effect } from 'effect';
+
+pipe(
+  validateUser(data),
+  Effect.map((user) => enrichUser(user)),
+  Effect.flatMap((user) => saveUser(user)),
+  Effect.mapError((e) => new ApiError(e))
+);
+```
+
+### Awaitly
+`awaitly/functional` provides similar utilities:
+```typescript
+import { pipe, R } from 'awaitly/functional';
+
+pipe(
+  data,
+  validateUser,
+  R.map((user) => enrichUser(user)),
+  R.andThen((user) => saveUser(user)),
+  R.mapError((e) => new ApiError(e))
+);
+```
+
+---
+
+## 13. Fetch Helpers Comparison
+
+How do you make type-safe HTTP requests?
+
+### Neverthrow
+Manual wrapping with `ResultAsync.fromPromise()`:
+```typescript
+const fetchUser = (id: string) =>
+  ResultAsync.fromPromise(
+    fetch(`/api/users/${id}`).then((r) => r.json()),
+    () => 'FETCH_ERROR'
+  );
+```
+
+### Effect
+Uses `HttpClient` service:
+```typescript
+import { HttpClient, HttpClientResponse } from '@effect/platform';
+
+const fetchUser = (id: string) =>
+  HttpClient.get(`/api/users/${id}`).pipe(
+    Effect.flatMap(HttpClientResponse.json),
+    Effect.mapError(() => 'FETCH_ERROR')
+  );
+```
+
+### Awaitly
+`awaitly/fetch` provides built-in helpers with error types:
+```typescript
+import { fetchJson } from 'awaitly/fetch';
+
+const result = await fetchJson<User>(`/api/users/${id}`);
+// Error type: NOT_FOUND | BAD_REQUEST | UNAUTHORIZED | FORBIDDEN | SERVER_ERROR | NETWORK_ERROR
 ```
 
 ---
@@ -352,9 +464,13 @@ const user = await step(
 | **Saga Pattern** | Manual | Manual | Built-in |
 | **Policies** | Manual | Via Schedule | Built-in |
 | **Durable Execution** | Manual | Manual | Built-in |
+| **Streaming** | Manual | Stream module | Built-in |
+| **Functional Utils** | Method chaining | pipe/flow | pipe/flow/R |
+| **Fetch Helpers** | Manual | HttpClient | fetchJson/fetchText |
+| **ESLint Plugin** | ✓ | ✓ | ✓ |
 | **Ecosystem** | Minimal | Massive | Focused |
 
 **Choose based on:**
 - **Neverthrow:** If you love functional chains and want a lightweight library for simple error handling.
-- **Effect:** If you need structured concurrency with fibers, sophisticated DI with layers, and are willing to learn.
-- **Awaitly:** If you want production-grade reliability (circuit breakers, rate limiting, sagas, durability) with familiar async/await syntax.
+- **Effect:** If you need structured concurrency with fibers, sophisticated DI with layers, powerful streams, and are willing to learn.
+- **Awaitly:** If you want production-grade reliability (circuit breakers, rate limiting, sagas, durability, streaming, functional utils) with familiar async/await syntax.

@@ -19,19 +19,20 @@
   "license": "ISC",
   "devDependencies": {
     "@effect/eslint-plugin": "^0.3.2",
-    "@eslint/compat": "^2.0.1",
+    "@eslint/compat": "^2.0.2",
     "@eslint/eslintrc": "^3.3.3",
     "@eslint/js": "^9.39.2",
     "eslint": "^9.39.2",
+    "eslint-plugin-awaitly": "^0.8.0",
     "eslint-plugin-neverthrow": "^1.1.4",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.53.1",
-    "vitest": "^4.0.17"
+    "typescript-eslint": "^8.54.0",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
-    "awaitly": "^1.6.0",
-    "effect": "^3.19.14",
+    "awaitly": "^1.16.0",
+    "effect": "^3.19.16",
     "neverthrow": "^8.2.0",
-    "zod": "^4.3.5"
+    "zod": "^4.3.6"
   }
 }

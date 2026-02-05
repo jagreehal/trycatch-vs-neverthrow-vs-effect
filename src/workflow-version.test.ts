@@ -12,11 +12,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { ok, err, type AsyncResult, type UnexpectedError } from 'awaitly';
-import {
-  createWorkflow,
-  isStepComplete,
-  type ResumeStateEntry,
-} from 'awaitly/workflow';
+import { createWorkflow, isStepComplete } from 'awaitly/workflow';
+
+/** Local type for step-complete payload (ResumeStateEntry shape when collecting from onEvent) */
+interface SavedStepEntry {
+  result: unknown;
+  meta?: unknown;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types & Errors (shared across all implementations)
@@ -277,7 +279,7 @@ export function createPaymentWorkflow(
   actorEmail: string
 ): AsyncResult<{ paymentId: string }, ValidationError | IdempotencyConflict | ProviderHardFail | ProviderUnavailable | PersistError | UnexpectedError> {
   // Create workflow with event stream for observability
-  const savedSteps = new Map<string, ResumeStateEntry>();
+  const savedSteps = new Map<string, SavedStepEntry>();
 
   const workflow = createWorkflow(createPaymentDeps, {
     onEvent: (event) => {
@@ -291,14 +293,14 @@ export function createPaymentWorkflow(
   // Execute workflow with clean async/await syntax
   return workflow(async (step, deps) => {
     // 1) Validate input
-    const input = await step(() => deps.validateInput(raw), {
-      name: 'Validate input',
+    const input = await step('validateInput', () => deps.validateInput(raw), {
+      description: 'Validate input',
       key: 'validate',
     });
 
     // 2) Check for existing payment (idempotency fast path)
-    const existing = await step(() => deps.findExisting(db, input.idemKey), {
-      name: 'Check existing',
+    const existing = await step('findExisting', () => deps.findExisting(db, input.idemKey), {
+      description: 'Check existing',
       key: `existing:${input.idemKey}`,
     });
 
@@ -307,8 +309,8 @@ export function createPaymentWorkflow(
     }
 
     // 3) Acquire lock
-    await step(() => deps.acquireLock(db, input.idemKey), {
-      name: 'Acquire lock',
+    await step('acquireLock', () => deps.acquireLock(db, input.idemKey), {
+      description: 'Acquire lock',
       key: `lock:${input.idemKey}`,
     });
 
@@ -320,14 +322,15 @@ export function createPaymentWorkflow(
       persistFailure(db, input, providerResult.error, actorEmail).catch(() => {
         // Swallow errors in failure persistence
       });
-      return await step(providerResult); // Early-exit with the error
+      return await step('callProvider', () => providerResult); // Early-exit with the error
     }
 
     // 5) Persist success
     return await step(
+      'persistSuccess',
       () => deps.persistSuccess(db, input, providerResult.value, actorEmail),
       {
-        name: 'Persist success',
+        description: 'Persist success',
         key: `persist:${input.idemKey}`,
       }
     );
@@ -514,6 +517,115 @@ describe('workflow', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Additional workflow-specific tests
 // ─────────────────────────────────────────────────────────────────────────────
+describe('workflow: step.sleep() and duration support', () => {
+  it('supports string duration syntax', async () => {
+    const workflow = createWorkflow({
+      fetchData: (): AsyncResult<string, never> => Promise.resolve(ok('data')),
+    });
+
+    const startTime = Date.now();
+
+    const result = await workflow(async (step, deps) => {
+      // Short sleep for testing (100ms = '100ms')
+      await step.sleep('sleep', '100ms');
+      return await step('fetchData', () => deps.fetchData());
+    });
+
+    const elapsed = Date.now() - startTime;
+    expect(elapsed).toBeGreaterThanOrEqual(90); // Allow some timing variance
+    expect(result.ok).toBe(true);
+  });
+
+  it('supports AbortSignal cancellation at workflow level', async () => {
+    const controller = new AbortController();
+
+    const workflow = createWorkflow(
+      { fetchData: (): AsyncResult<string, never> => Promise.resolve(ok('data')) },
+      { signal: controller.signal }
+    );
+
+    // Cancel after 50ms
+    setTimeout(() => controller.abort(), 50);
+
+    const result = await workflow(async (step) => {
+      await step.sleep('sleep', '5s');
+      return 'completed';
+    });
+
+    // Should be cancelled, not completed
+    expect(result.ok).toBe(false);
+  });
+
+  it('caches sleep with key for resume', async () => {
+    const cache = new Map();
+    const workflow = createWorkflow(
+      { fetchData: (): AsyncResult<string, never> => Promise.resolve(ok('data')) },
+      { cache }
+    );
+
+    // First run - sleep should execute
+    const startTime1 = Date.now();
+    await workflow(async (step) => {
+      await step.sleep('sleep', '100ms', { key: 'test-sleep' });
+      return 'done';
+    });
+    const elapsed1 = Date.now() - startTime1;
+    expect(elapsed1).toBeGreaterThanOrEqual(90);
+
+    // Second run - sleep should be cached (skipped)
+    const startTime2 = Date.now();
+    await workflow(async (step) => {
+      await step.sleep('sleep', '100ms', { key: 'test-sleep' });
+      return 'done';
+    });
+    const elapsed2 = Date.now() - startTime2;
+    expect(elapsed2).toBeLessThan(50); // Should be much faster (cached)
+  });
+});
+
+describe('workflow: functional utilities (pipe/flow)', () => {
+  it('composes with pipe', async () => {
+    // Import would be: import { pipe, R } from 'awaitly/functional';
+    // For this test, we simulate the pattern
+    const double = (x: number) => ok(x * 2);
+    const addTen = (x: number) => ok(x + 10);
+
+    const workflow = createWorkflow({ double, addTen });
+
+    const result = await workflow(async (step, deps) => {
+      // Simulate pipe: input -> double -> addTen
+      const doubled = await step('double', () => deps.double(5));
+      const final = await step('addTen', () => deps.addTen(doubled));
+      return final;
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(20); // (5 * 2) + 10
+    }
+  });
+
+  it('handles errors in pipeline', async () => {
+    const validate = (x: number): AsyncResult<number, 'INVALID'> =>
+      x > 0 ? Promise.resolve(ok(x)) : Promise.resolve(err('INVALID'));
+
+    const process = (x: number): AsyncResult<number, 'PROCESS_ERROR'> =>
+      Promise.resolve(ok(x * 2));
+
+    const workflow = createWorkflow({ validate, process });
+
+    const result = await workflow(async (step, deps) => {
+      const validated = await step('validate', () => deps.validate(-5)); // Will fail
+      return await step('process', () => deps.process(validated));
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('INVALID');
+    }
+  });
+});
+
 describe('workflow: additional features', () => {
   it('captures events for observability', async () => {
     const events: string[] = [];
@@ -528,7 +640,7 @@ describe('workflow: additional features', () => {
     });
 
     await workflow(async (step, d) => {
-      return await step(() => d.fetchData(), { name: 'Fetch data', key: 'fetch' });
+      return await step('fetchData', () => d.fetchData(), { description: 'Fetch data', key: 'fetch' });
     });
 
     expect(events).toContain('workflow_start');
@@ -552,8 +664,8 @@ describe('workflow: additional features', () => {
     const workflow = createWorkflow(deps, { cache });
 
     await workflow(async (step, d) => {
-      const a = await step(() => d.expensiveOp(), { key: 'expensive' });
-      const b = await step(() => d.expensiveOp(), { key: 'expensive' }); // Cached!
+      const a = await step('expensiveOp', () => d.expensiveOp(), { key: 'expensive' });
+      const b = await step('expensiveOp', () => d.expensiveOp(), { key: 'expensive' }); // Cached!
       return a + b;
     });
 
@@ -578,9 +690,9 @@ describe('workflow: additional features', () => {
     const workflow = createWorkflow(deps);
 
     const result = await workflow(async (step, d) => {
-      const user = await step(() => d.validateUser('1'));
-      await step(() => d.checkPermission(user.id));
-      await step(() => d.saveData('test'));
+      const user = await step('validateUser', () => d.validateUser('1'));
+      await step('checkPermission', () => d.checkPermission(user.id));
+      await step('saveData', () => d.saveData('test'));
       return 'success';
     });
 
@@ -588,7 +700,7 @@ describe('workflow: additional features', () => {
 
     // Test error case - TypeScript knows exact error type
     const errorResult = await workflow(async (step, d) => {
-      await step(() => d.validateUser('999')); // Will fail
+      await step('validateUser', () => d.validateUser('999')); // Will fail
       return 'never reached';
     });
 

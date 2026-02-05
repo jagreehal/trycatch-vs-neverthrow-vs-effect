@@ -71,19 +71,19 @@ graph TD
 
 All four approaches model the same payment workflow. In the repo, the implementations are exercised by a shared test suite.
 
-| Approach | Error Visibility | Composability | Ergonomics | Ecosystem Weight |
-|----------|-----------------|---------------|------------|------------------|
-| **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Minimal |
-| **Neverthrow** | High | High | High (chains), Medium (async/await) | Light |
-| **Effect** | Very High | Very High | Low → Medium (learning) | Heavy |
-| **Awaitly** | High | High | High (async/await) | Light |
+| Approach | Error Visibility | Composability | Ergonomics | Streaming | Functional | Type-Safe Fetch | ESLint Plugin |
+|----------|-----------------|---------------|------------|-----------|------------|-----------------|---------------|
+| **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Manual | Manual | Manual | - |
+| **Neverthrow** | High | High | High (chains) | Manual | Manual | Manual | ✓ |
+| **Effect** | Very High | Very High | Low → Medium | ✓ Stream | ✓ pipe/flow | ✓ HttpClient | ✓ |
+| **Awaitly** | High | High | High (async/await) | ✓ Streaming | ✓ pipe/flow | ✓ fetchJson | ✓ |
 
 **Key Differentiators:**
 
 - **Vanilla**: Simplest to write, but errors hide in function signatures.
 - **Neverthrow**: Best for functional chaining and explicit error types.
-- **Effect**: Most powerful ecosystem (DI, layers, scheduling, tracing) but has a steep learning curve.
-- **Awaitly**: Familiar async/await syntax with error inference, retries, timeouts, and caching.
+- **Effect**: Most powerful ecosystem (DI, layers, scheduling, tracing, streams) but has a steep learning curve.
+- **Awaitly**: Familiar async/await syntax with error inference, retries, timeouts, caching, streaming, functional utilities (`pipe`/`flow`), and type-safe fetch helpers.
 
 ## Four Philosophies
 
@@ -451,7 +451,8 @@ What if you could write code that looks like async/await (familiar to everyone) 
 Welcome to Awaitly, where `step()` unwraps Results and exits early on error—automatically.
 
 ```typescript
-import { run, ok, err, type AsyncResult } from 'awaitly';
+import { ok, err, type AsyncResult } from 'awaitly';
+import { run } from 'awaitly/run';
 
 const validatePayment = async (data: unknown): AsyncResult<Payment, ValidationError> =>
   isValid(data) ? ok(parsePayment(data)) : err(new ValidationError('Invalid'));
@@ -464,9 +465,9 @@ const saveToDatabase = async (result: ChargeResult): AsyncResult<void, DatabaseE
 
 // Clean imperative workflow with run()
 const result = await run(async (step) => {
-  const payment = await step(validatePayment(data)); // Unwraps Result, exits early on error
-  const charge = await step(chargeCustomer(payment)); // Only runs if validation succeeded
-  await step(saveToDatabase(charge));                  // Only runs if charge succeeded
+  const payment = await step('validatePayment', () => validatePayment(data)); // Unwraps Result, exits early on error
+  const charge = await step('chargeCustomer', () => chargeCustomer(payment)); // Only runs if validation succeeded
+  await step('saveToDatabase', () => saveToDatabase(charge));                  // Only runs if charge succeeded
   return { success: true };
 }, { onError: () => {} });
 
@@ -483,9 +484,9 @@ import { createWorkflow } from 'awaitly/workflow';
 const makePayment = createWorkflow({ validatePayment, chargeCustomer, saveToDatabase });
 
 const result = await makePayment(async (step, deps) => {
-  const payment = await step(() => deps.validatePayment(data), { key: 'validate' }); // Cached
-  const charge = await step(() => deps.chargeCustomer(payment), { key: 'charge' });
-  await step(() => deps.saveToDatabase(charge), { key: 'save' });
+  const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' }); // Cached
+  const charge = await step('chargeCustomer', () => deps.chargeCustomer(payment), { key: 'charge' });
+  await step('saveToDatabase', () => deps.saveToDatabase(charge), { key: 'save' });
   return { success: true };
 });
 
@@ -501,15 +502,15 @@ The scariest failure mode is "provider charge succeeded, but persistence failed.
 const makePayment = createWorkflow({ validatePayment, callProvider, persistSuccess });
 
 const result = await makePayment(async (step, deps) => {
-  const payment = await step(() => deps.validatePayment(data), { key: 'validate' });
+  const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' });
 
   // Never repeat this once it succeeds:
-  const charge = await step(() => deps.callProvider(payment), {
+  const charge = await step('callProvider', () => deps.callProvider(payment), {
     key: `charge:${payment.idempotencyKey}`,
   });
 
   // If this fails (DB down), you can rerun later and resume here without re-charging:
-  await step(() => deps.persistSuccess(payment, charge), { key: `persist:${charge.id}` });
+  await step('persistSuccess', () => deps.persistSuccess(payment, charge), { key: `persist:${charge.id}` });
 
   return { paymentId: charge.paymentId };
 });
@@ -611,8 +612,8 @@ Write normal async/await code, and `step()` handles early-exit error propagation
 
 ```typescript
 const result = await run(async (step) => {
-  const user = await step(fetchUser('1'));
-  const posts = await step(fetchPosts(user.id));
+  const user = await step('getUser', () => fetchUser('1'));
+  const posts = await step('getPosts', () => fetchPosts(user.id));
   return { user, posts };
 }, { onError: () => {} });
 ```
@@ -627,6 +628,7 @@ For operations that might throw (like wrapping existing APIs), use `step.try()` 
 
 ```typescript
 const response = await step.try(
+  'riskyOp',
   () => riskyOperation(),
   { onError: (e) => new CustomError(String(e)) }
 );
@@ -653,12 +655,14 @@ Awaitly includes production-ready scheduling without needing a separate library:
 ```typescript
 // Retry with exponential backoff
 const user = await step.retry(
+  'fetchUser',
   () => fetchUser(id),
   { attempts: 3, backoff: 'exponential', initialDelay: 100, jitter: true }
 );
 
 // Timeout with AbortSignal support
 const data = await step.withTimeout(
+  'fetch',
   (signal) => fetch(url, { signal }),
   { ms: 5000, signal: true }
 );
@@ -669,7 +673,109 @@ Pre-built policies are available for common patterns:
 ```typescript
 import { retryPolicies, timeoutPolicies } from 'awaitly/policies';
 
-const user = await step.retry(() => fetchUser(id), retryPolicies.transient);
+const user = await step.retry('fetchUser', () => fetchUser(id), retryPolicies.transient);
+```
+
+**Streaming with Results**
+
+Awaitly v1.11.0 introduces `awaitly/streaming` for processing data streams with Result types and backpressure handling:
+
+```typescript
+import { createMemoryStreamStore, map, filter, chunk, collect } from 'awaitly/streaming';
+
+// Create a stream store for workflow integration
+const store = createMemoryStreamStore<string>();
+
+await run(async (step) => {
+  const writable = await step.getWritable(store, { key: 'output' });
+
+  // Transform stream with Result-aware operators
+  const processed = writable
+    .pipeThrough(map((line) => ok(line.toUpperCase())))
+    .pipeThrough(filter((line) => line.length > 0))
+    .pipeThrough(chunk(100));
+
+  // Collect all results
+  const results = await step('collect', () => collect(processed));
+  return results;
+});
+```
+
+**Functional Utilities (pipe/flow)**
+
+For teams who want Effect-style composition without the full ecosystem, `awaitly/functional` provides familiar utilities:
+
+```typescript
+import { pipe, flow, R } from 'awaitly/functional';
+
+// pipe: Apply functions left-to-right to a value
+const result = pipe(
+  input,
+  R.map((x) => x * 2),
+  R.filter((x) => x > 10),
+  R.andThen((x) => fetchData(x))
+);
+
+// flow: Create reusable pipelines
+const processUser = flow(
+  validateUser,
+  R.andThen(enrichUser),
+  R.mapError(toApiError)
+);
+
+const result = await processUser(userData);
+```
+
+**Type-Safe Fetch**
+
+The `awaitly/fetch` module provides type-safe HTTP operations with built-in error types:
+
+```typescript
+import { fetchJson, fetchText } from 'awaitly/fetch';
+
+// Built-in error types: NOT_FOUND, BAD_REQUEST, UNAUTHORIZED, FORBIDDEN, SERVER_ERROR, NETWORK_ERROR
+const result = await fetchJson<User>('https://api.example.com/users/1');
+
+if (!result.ok) {
+  switch (result.error.type) {
+    case 'NOT_FOUND': return handleNotFound();
+    case 'NETWORK_ERROR': return handleNetworkError();
+  }
+}
+
+// Custom error mapping
+const customResult = await fetchJson<User>(url, {
+  mapError: (status, body) => {
+    if (status === 404) return { type: 'USER_NOT_FOUND', userId: body.id };
+    return { type: 'API_ERROR', status };
+  }
+});
+```
+
+**step.sleep() with Duration Support**
+
+Cancellation-aware delays with human-readable duration strings:
+
+```typescript
+import { run } from 'awaitly/run';
+import { seconds, minutes } from 'awaitly/duration';
+
+await run(async (step) => {
+  // String duration syntax (ID first, then duration)
+  await step.sleep('delay', '5s');
+  await step.sleep('delay', '1m 30s');
+
+  // Duration helpers
+  await step.sleep('delay', seconds(5));
+  await step.sleep('delay', minutes(1));
+
+  // With AbortSignal for cancellation
+  const controller = new AbortController();
+  await step.sleep('delay', '10s', { signal: controller.signal });
+
+  // With caching
+  await step.sleep('delay', '5s', { key: 'rate-limit-delay' });
+});
 ```
 
 ---
@@ -725,22 +831,31 @@ flowchart TD
     WantAutoInference -->|Yes| FamiliarSyntax{Want async/await syntax?}
     WantAutoInference -->|No| NeedsPolicies{Need timeouts, retries, etc?}
 
-    FamiliarSyntax -->|Yes| awaitly[🎼 Awaitly]
+    FamiliarSyntax -->|Yes| NeedStreaming{Need streaming?}
     FamiliarSyntax -->|No| Neverthrow
 
-    NeedsPolicies -->|Yes| TeamReady{Team ready for learning?}
+    NeedStreaming -->|Yes| awaitly[🎼 Awaitly]
+    NeedStreaming -->|No| WantFunctional{Want Effect-like<br/>functional style?}
+
+    WantFunctional -->|Yes| awaitly
+    WantFunctional -->|No| awaitly
+
+    NeedsPolicies -->|Yes| TeamReady{Team ready for<br/>FP learning curve?}
     NeedsPolicies -->|No| Neverthrow
 
-    TeamReady -->|Yes| Effect[🏗️ Effect]
+    TeamReady -->|Yes| NeedFibers{Need fibers &<br/>structured concurrency?}
     TeamReady -->|No| awaitly
+
+    NeedFibers -->|Yes| Effect[🏗️ Effect]
+    NeedFibers -->|No| awaitly
 
     TryCatch --> TryCatchGood[✅ Perfect for simple cases<br/>✅ Everyone knows it<br/>❌ Gets messy with complexity]
 
-    Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Learning curve for team]
+    Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Manual error unions]
 
-    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Retries, timeouts built-in<br/>✅ Inference, caching, resume]
+    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Streaming, pipe/flow, fetch<br/>✅ ESLint plugin for safety]
 
-    Effect --> EffectGood[✅ Powerful policies<br/>✅ Excellent testability<br/>❌ Steep learning curve]
+    Effect --> EffectGood[✅ Most powerful ecosystem<br/>✅ Structured concurrency<br/>❌ Steep learning curve]
 
     style TryCatch fill:#FFE4B5
     style Neverthrow fill:#E0E0E0
@@ -781,13 +896,14 @@ const divideEffect = (a: number, b: number) =>
 
 ```typescript
 // Awaitly approach
-import { run, ok, err, type Result } from 'awaitly';
+import { ok, err, type Result } from 'awaitly';
+import { run } from 'awaitly/run';
 
 const divideWorkflow = (a: number, b: number): Result<number, Error> =>
   b === 0 ? err(new Error('Division by zero')) : ok(a / b);
 
 const result = await run(async (step) => {
-  const x = await step(divideWorkflow(10, 2)); // 5
+  const x = await step('divide', () => divideWorkflow(10, 2)); // 5
   return x;
 });
 
@@ -804,8 +920,20 @@ Notice how the function signatures tell different stories:
 ## Want to Learn More?
 
 - 📖 **[ADVANCED.md](./ADVANCED.md)** - Deep dive into implementation details, migration strategies, and performance considerations
+- 🔌 **[Integration Guides](./src/integrations/)** - Using Awaitly with Zod, Prisma, React Query, and more
 - 💻 **[src/](./src/)** - Complete working examples of all four approaches
 - 🧪 **Run the examples** - `npm install && npm test` to see them in action
+
+### Integration Guides
+
+Awaitly works alongside your existing libraries:
+
+| Library | Guide | Description |
+| :--- | :--- | :--- |
+| **Zod** | [zod.md](./src/integrations/zod.md) | Validation errors → typed Results |
+| **Prisma** | [prisma.md](./src/integrations/prisma.md) | Database errors → exhaustive handling |
+| **React Query** | [react-query.md](./src/integrations/react-query.md) | Server state with Result types |
+| **neverthrow** | [neverthrow-migration.md](./src/integrations/neverthrow-migration.md) | Gradual migration path |
 
 ## The Uncomfortable Truth
 

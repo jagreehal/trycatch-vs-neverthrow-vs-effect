@@ -6,6 +6,7 @@ import tseslint from 'typescript-eslint';
 import { fixupPluginRules } from '@eslint/compat';
 import effectPlugin from '@effect/eslint-plugin';
 import neverthrowPlugin from 'eslint-plugin-neverthrow';
+import awaitlyPlugin from 'eslint-plugin-awaitly';
 // Ensure Effect rules apply only to TS files as well
 const effectRecommended = effectPlugin?.configs?.recommended
   ? [
@@ -74,6 +75,30 @@ export default [
     plugins: { neverthrow: fixupPluginRules(neverthrowPlugin) },
     rules: {
       'neverthrow/must-use-result': 'error',
+    },
+  },
+  // Awaitly plugin rules for workflow safety
+  {
+    files: ['**/*.ts', '**/*.tsx'],
+    ignores: ['**/*.test.ts', '**/*.test.tsx', 'test/**/*'],
+    plugins: { awaitly: fixupPluginRules(awaitlyPlugin) },
+    rules: {
+      // Prevents step(fn()) - must be step(() => fn())
+      'awaitly/no-immediate-execution': 'error',
+      // Requires thunk when using key option
+      'awaitly/require-thunk-for-key': 'error',
+      // Warns about dynamic cache keys
+      'awaitly/stable-cache-keys': 'warn',
+      // Ensures workflows are awaited
+      'awaitly/no-floating-workflow': 'error',
+      // Ensures Results are handled
+      'awaitly/no-floating-result': 'error',
+      // Enforces .ok checks before accessing value
+      'awaitly/require-result-handling': 'warn',
+      // Prevents options on executor instead of step
+      'awaitly/no-options-on-executor': 'error',
+      // Prevents ok(ok(...)) double wrapping
+      'awaitly/no-double-wrap-result': 'error',
     },
   },
   ...effectRecommended,

@@ -125,9 +125,92 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 | **Saga/Rollback** | Built-in (`createSagaWorkflow`) | Manual | Manual |
 | **Circuit Breaker** | Built-in | Manual | Manual |
 
+### Type-Safe Fetch for Checkout APIs (v1.11.0)
+
+For checkout flows calling external APIs, `awaitly/fetch` provides type-safe HTTP operations:
+
+```typescript
+import { fetchJson } from 'awaitly/fetch';
+
+// Define custom error types for checkout
+type CheckoutApiError =
+  | { type: 'INVENTORY_UNAVAILABLE'; productId: string }
+  | { type: 'PAYMENT_DECLINED'; reason: string }
+  | { type: 'SHIPPING_UNAVAILABLE'; address: string }
+  | { type: 'API_ERROR'; status: number };
+
+const checkInventory = (productId: string, quantity: number) =>
+  fetchJson<{ available: boolean; reserved?: string }>(
+    `/api/inventory/${productId}/check`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ quantity }),
+      mapError: (status, body): CheckoutApiError => {
+        if (status === 409) {
+          return { type: 'INVENTORY_UNAVAILABLE', productId };
+        }
+        return { type: 'API_ERROR', status };
+      },
+    }
+  );
+
+const processPayment = (paymentData: PaymentRequest) =>
+  fetchJson<PaymentResult>('/api/payments', {
+    method: 'POST',
+    body: JSON.stringify(paymentData),
+    mapError: (status, body): CheckoutApiError => {
+      if (status === 402) {
+        return { type: 'PAYMENT_DECLINED', reason: body?.message ?? 'Unknown' };
+      }
+      return { type: 'API_ERROR', status };
+    },
+  });
+
+// Usage in checkout workflow
+const checkout = createSagaWorkflow({
+  checkInventory,
+  processPayment,
+  scheduleShipping,
+});
+
+const result = await checkout(async (saga, deps) => {
+  // Check inventory with typed error
+  const inventory = await saga.step(
+    () => deps.checkInventory(item.productId, item.quantity),
+    { compensate: (inv) => releaseInventory(inv.reserved!) }
+  );
+
+  // Process payment with typed error
+  const payment = await saga.step(
+    () => deps.processPayment({ amount, card }),
+    { compensate: (p) => refundPayment(p.transactionId) }
+  );
+
+  return { orderId: payment.orderId };
+});
+
+// Handle specific checkout errors
+if (!result.ok) {
+  switch (result.error.type) {
+    case 'INVENTORY_UNAVAILABLE':
+      return { error: `Product ${result.error.productId} is out of stock` };
+    case 'PAYMENT_DECLINED':
+      return { error: `Payment declined: ${result.error.reason}` };
+    case 'SHIPPING_UNAVAILABLE':
+      return { error: 'Shipping not available to your address' };
+  }
+}
+```
+
+**Benefits:**
+- Type-safe error mapping from HTTP status codes
+- Automatic error type inference in workflows
+- No manual Result wrapping of fetch calls
+- Built-in handling of network errors
+
 ## Conclusion
 
 For **Complex Business Logic (like Checkout)**:
-- **Awaitly** is the winner for **DX** and **Production Reliability**. Automatic error inference, familiar async/await syntax, plus built-in saga pattern for rollback scenarios.
+- **Awaitly** is the winner for **DX** and **Production Reliability**. Automatic error inference, familiar async/await syntax, built-in saga pattern for rollback scenarios, plus type-safe fetch helpers for external APIs.
 - **Effect** is the winner for **Structured Concurrency**. If you need fiber-based cancellation and are comfortable with functional programming.
 - **Neverthrow** is solid for simple cases but gets verbose with complex variable dependencies and lacks built-in reliability features.

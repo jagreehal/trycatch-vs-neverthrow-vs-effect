@@ -20,14 +20,17 @@ import {
   allAsync,
   tryAsync,
   isPromiseRejectedError,
+  type Result,
   type AsyncResult,
   type UnexpectedError,
 } from 'awaitly';
-import {
-  createWorkflow,
-  isStepComplete,
-  type ResumeStateEntry,
-} from 'awaitly/workflow';
+import { createWorkflow, isStepComplete } from 'awaitly/workflow';
+
+/** Local type for resume state entry (ResumeStateEntry shape when using onEvent) */
+interface SavedStepEntry {
+  result: Result<unknown, unknown, unknown>;
+  meta?: unknown;
+}
 
 // ============================================================================
 // Shared Types
@@ -138,52 +141,55 @@ export async function dataPipelineWorkflow(
   options?: {
     cache?: Map<string, any>;
     onEvent?: (event: any) => void;
-    resumeState?: { steps: Map<string, ResumeStateEntry> };
+    resumeState?: { steps: Map<string, SavedStepEntry> };
   }
 ): AsyncResult<Analytics, FetchError | ProcessError | UnexpectedError> {
   const workflow = createWorkflow({ fetchUser, fetchPosts, fetchComments, processAnalytics }, {
     cache: options?.cache,
     onEvent: options?.onEvent,
-    resumeState: options?.resumeState,
+    resumeState: options?.resumeState as any,
   });
 
   return workflow(async (step) => {
     const user = await step(
+      'fetchUser',
       () => fetchUser(userId),
       {
-        name: 'Fetch user',
+        description: 'Fetch user',
         key: `user:${userId}`,
       }
     );
 
     const posts = await step(
+      'fetchPosts',
       () => fetchPosts(userId),
       {
-        name: 'Fetch posts',
+        description: 'Fetch posts',
         key: `posts:${userId}`,
       }
     );
 
     const commentResults = await step.fromResult(
-      () => allAsync(posts.map(post => fetchComments(post.id))),
+      'fetchComments',
+      () => allAsync(posts.map((post: Post) => fetchComments(post.id))),
       {
-        onError: (error): FetchError => {
+        onError: (error: unknown): FetchError => {
           // Since fetchComments uses tryAsync, PromiseRejectedError shouldn't occur
           if (isPromiseRejectedError(error)) {
             return 'COMMENTS_FETCH_FAILED';
           }
-          return error;
+          return error as FetchError;
         },
-        name: 'Fetch all comments',
         key: `comments:${userId}`,
       }
     );
     const allComments = commentResults.flat();
 
     const analytics = await step(
+      'processAnalytics',
       () => processAnalytics(user, posts, allComments),
       {
-        name: 'Process analytics',
+        description: 'Process analytics',
         key: `analytics:${userId}`,
       }
     );
@@ -367,7 +373,7 @@ describe('Data Pipeline', () => {
     });
 
     it('supports resume state for long-running processes', async () => {
-      const savedSteps = new Map<string, ResumeStateEntry>();
+      const savedSteps = new Map<string, SavedStepEntry>();
 
       await dataPipelineWorkflow('user-1', {
         onEvent: (event) => {

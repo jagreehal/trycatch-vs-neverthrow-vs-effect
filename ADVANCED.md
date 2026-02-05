@@ -421,7 +421,8 @@ Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece. No ne
 ### Approach 3: The Orchestrator (Awaitly)
 
 ```typescript
-import { createWorkflow, ok, err, type AsyncResult } from 'awaitly/workflow';
+import { ok, err, type AsyncResult } from 'awaitly';
+import { createWorkflow } from 'awaitly/workflow';
 import { retryPolicies } from 'awaitly/policies';
 
 // Type-safe error types
@@ -542,13 +543,13 @@ export async function createPaymentAwaitly(
 
   return workflow(async (step, deps) => {
     // 1) Validate input
-    const input = await step(() => deps.parse(raw), {
+    const input = await step('parse', () => deps.parse(raw), {
       name: 'Parse input',
       key: 'parse',
     });
 
     // 2) Check for existing payment (idempotency)
-    const existing = await step(() => deps.findExisting(db, input.idemKey), {
+    const existing = await step('findExisting', () => deps.findExisting(db, input.idemKey), {
       name: 'Check existing',
       key: `existing:${input.idemKey}`,
     });
@@ -558,7 +559,7 @@ export async function createPaymentAwaitly(
     }
 
     // 3) Acquire lock
-    await step(() => deps.acquireLock(db, input.idemKey), {
+    await step('acquireLock', () => deps.acquireLock(db, input.idemKey), {
       name: 'Acquire lock',
       key: `lock:${input.idemKey}`,
     });
@@ -567,6 +568,7 @@ export async function createPaymentAwaitly(
     let response: ProviderResponse;
     try {
       response = await step.retry(
+        'callProvider',
         () => deps.callProvider(provider, input),
         {
           attempts: 3,
@@ -584,7 +586,7 @@ export async function createPaymentAwaitly(
     } catch (e) {
       // Soft failures: persist failure record, then fail
       if (e instanceof ProviderSoftFail || e instanceof TimeoutError) {
-        await step(() => deps.persistFailure(db, actorEmail, input, e), {
+        await step('persistFailure', () => deps.persistFailure(db, actorEmail, input, e), {
           name: 'Persist failure',
           key: `persist-fail:${input.idemKey}`,
         });
@@ -595,9 +597,10 @@ export async function createPaymentAwaitly(
 
     // 5) Persist success
     const paymentId = await step(
+      'persistSuccess',
       () => deps.persistSuccess(db, actorEmail, input, response),
       {
-        name: 'Persist success',
+        description: 'Persist success',
         key: `persist:${input.idemKey}`,
       }
     );
@@ -655,17 +658,17 @@ const result = await durable.run(
   { chargeCard, sendReceipt, updateInventory },
   async (step, deps) => {
     // Each keyed step is automatically checkpointed
-    const charge = await step(() => deps.chargeCard(payment), {
+    const charge = await step('chargeCard', () => deps.chargeCard(payment), {
       key: 'charge',
       name: 'Charge card',
     });
 
-    await step(() => deps.updateInventory(items), {
+    await step('updateInventory', () => deps.updateInventory(items), {
       key: 'inventory',
       name: 'Update inventory',
     });
 
-    await step(() => deps.sendReceipt(charge), {
+    await step('sendReceipt', () => deps.sendReceipt(charge), {
       key: 'receipt',
       name: 'Send receipt',
     });
@@ -777,7 +780,7 @@ const apiBreaker = createCircuitBreaker('external-api', {
 const result = await workflow(async (step, deps) => {
   // executeResult returns a Result, no exceptions
   const data = await paymentBreaker.executeResult(() =>
-    step(() => deps.chargeCard(payment))
+    step('chargeCard', () => deps.chargeCard(payment))
   );
 
   if (!data.ok && isCircuitOpenError(data.error)) {
@@ -830,12 +833,12 @@ const limiter = createCombinedLimiter('api', {
 const result = await workflow(async (step, deps) => {
   // Rate-limited API call
   const data = await apiLimiter.execute(() =>
-    step(() => deps.callExternalApi())
+    step('callApi', () => deps.callExternalApi())
   );
 
   // Batch with concurrency control
   const results = await dbLimiter.executeAll(
-    ids.map((id) => () => step(() => deps.fetchItem(id)))
+    ids.map((id) => () => step('fetchItem', () => deps.fetchItem(id)))
   );
 
   return { data, results };
@@ -863,8 +866,9 @@ import {
 
 // Inline policy application
 const user = await step(
+  'fetchUser',
   () => deps.fetchUser(id),
-  withPolicy(servicePolicies.httpApi, { name: 'fetch-user', key: `user:${id}` })
+  withPolicy(servicePolicies.httpApi, { description: 'fetch-user', key: `user:${id}` })
 );
 
 // Policy registry for org-wide standards
@@ -875,8 +879,9 @@ registry.register('cache', servicePolicies.cache);
 
 // Use from registry
 const data = await step(
+  'queryDatabase',
   () => deps.queryDatabase(query),
-  registry.apply('db', { name: 'query-users' })
+  registry.apply('db', { description: 'query-users' })
 );
 
 // Compose policies
@@ -916,6 +921,385 @@ const [user1, user2, user3] = await Promise.all([
 - Deduplicate API calls during page load
 - Share expensive computations across callers
 
+#### Streaming with Results (v1.11.0)
+
+The `awaitly/streaming` module provides Result-aware stream processing with transformers and backpressure handling:
+
+```typescript
+import {
+  createMemoryStreamStore,
+  createFileStreamStore,
+  map,
+  filter,
+  flatMap,
+  chunk,
+  take,
+  skip,
+  collect,
+  reduce,
+} from 'awaitly/streaming';
+
+// Create stream stores for workflow integration
+const memoryStore = createMemoryStreamStore<string>();
+const fileStore = createFileStreamStore('./output.txt');
+
+await run(async (step) => {
+  // Get writable and readable streams within workflow
+  const writable = await step.getWritable(memoryStore, { key: 'stream-output' });
+  const readable = await step.getReadable(memoryStore, { key: 'stream-input' });
+
+  // Transform pipeline with Result-aware operators
+  const processed = readable
+    .pipeThrough(map((line) => ok(line.toUpperCase())))
+    .pipeThrough(filter((line) => line.startsWith('VALID:')))
+    .pipeThrough(flatMap((line) => ok(line.split(',')))) // One-to-many
+    .pipeThrough(chunk(100)) // Batch into arrays of 100
+    .pipeThrough(take(1000)); // Limit total items
+
+  // Collect all results
+  const results = await step('collect', () => collect(processed));
+
+  // Or reduce to a single value
+  const count = await step('reduce', () => reduce(processed, (acc, item) => acc + 1, 0));
+
+  return { results, count };
+});
+```
+
+**Backpressure Handling:**
+
+```typescript
+import { createBackpressuredWriter } from 'awaitly/streaming';
+
+const writer = createBackpressuredWriter(writable, {
+  highWaterMark: 1000,
+  onBackpressure: () => console.log('Slowing down...'),
+  onDrain: () => console.log('Resuming...'),
+});
+
+// Automatically pauses when buffer is full
+for (const item of hugeDataset) {
+  await writer.write(item);
+}
+await writer.close();
+```
+
+**Limitations vs Effect Stream:**
+- No windowing or complex time-based operations
+- Less sophisticated backpressure strategies
+- Simpler API trades off some power for familiarity
+
+#### Functional Utilities (v1.11.0)
+
+The `awaitly/functional` module provides Effect-style composition utilities:
+
+```typescript
+import { pipe, flow, compose, R } from 'awaitly/functional';
+
+// pipe: Apply functions left-to-right to a value
+const result = pipe(
+  { name: 'Alice', age: 30 },
+  R.map((user) => ({ ...user, name: user.name.toUpperCase() })),
+  R.andThen((user) => validateUser(user)),
+  R.mapError((e) => new ApiError(e))
+);
+
+// flow: Create reusable pipelines (functions, not values)
+const processOrder = flow(
+  validateOrder,
+  R.andThen(calculateTotal),
+  R.andThen(applyDiscount),
+  R.mapError(toOrderError)
+);
+
+const result = await processOrder(orderData);
+
+// compose: Like flow but right-to-left (traditional FP style)
+const processOrder = compose(
+  R.mapError(toOrderError),
+  R.andThen(applyDiscount),
+  R.andThen(calculateTotal),
+  validateOrder
+);
+```
+
+**R Namespace (Curried Pipeable Functions):**
+
+```typescript
+import { R } from 'awaitly/functional';
+
+// R provides curried versions for use in pipe/flow
+R.map((x) => x * 2)           // Result<A, E> => Result<B, E>
+R.mapError((e) => new Error(e)) // Result<A, E1> => Result<A, E2>
+R.andThen((x) => fetchData(x))  // Result<A, E1> => Result<B, E1 | E2>
+R.orElse((e) => ok(defaultValue)) // Result<A, E> => Result<A, never>
+R.unwrapOr(defaultValue)        // Result<A, E> => A
+R.tap((x) => console.log(x))    // Side effect without changing value
+R.tapError((e) => logError(e))  // Side effect on error
+```
+
+**Collection Utilities:**
+
+```typescript
+import { all, allAsync, allSettled, any, race, traverse } from 'awaitly/functional';
+
+// all: Combine sync Results (first-error semantics)
+const result = all([validateA(a), validateB(b), validateC(c)]);
+
+// allAsync: Combine async Results
+const result = await allAsync([fetchA(), fetchB(), fetchC()]);
+
+// allSettled: Collect all errors
+const result = allSettled([validateA(a), validateB(b), validateC(c)]);
+
+// any: First success wins
+const result = await any([tryCache(), tryDb(), tryApi()]);
+
+// race: First to complete (success or error)
+const result = await race([fastApi(), slowApi()]);
+
+// traverse: Map then combine
+const result = await traverse(userIds, (id) => fetchUser(id));
+```
+
+**Limitations vs Effect:**
+- No Fiber semantics or structured concurrency
+- No Effect's Layer/Context for dependency injection
+- Designed as a stepping stone, not a replacement
+
+#### Type-Safe Fetch (v1.11.0)
+
+The `awaitly/fetch` module provides type-safe HTTP operations with built-in error types:
+
+```typescript
+import { fetchJson, fetchText, fetchBlob, fetchArrayBuffer } from 'awaitly/fetch';
+
+// Basic usage with automatic error typing
+const result = await fetchJson<User>('https://api.example.com/users/1');
+
+if (!result.ok) {
+  // Error types: NOT_FOUND | BAD_REQUEST | UNAUTHORIZED | FORBIDDEN | SERVER_ERROR | NETWORK_ERROR
+  switch (result.error.type) {
+    case 'NOT_FOUND':
+      console.log('User not found');
+      break;
+    case 'UNAUTHORIZED':
+      console.log('Please log in');
+      break;
+    case 'NETWORK_ERROR':
+      console.log('Check your connection');
+      break;
+    case 'SERVER_ERROR':
+      console.log(`Server error: ${result.error.status}`);
+      break;
+  }
+}
+
+// With request options
+const result = await fetchJson<CreateUserResponse>('https://api.example.com/users', {
+  method: 'POST',
+  body: JSON.stringify({ name: 'Alice' }),
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// Other fetch helpers
+const textResult = await fetchText('https://api.example.com/readme');
+const blobResult = await fetchBlob('https://api.example.com/image.png');
+const bufferResult = await fetchArrayBuffer('https://api.example.com/binary');
+```
+
+**Custom Error Mapping:**
+
+```typescript
+type MyError =
+  | { type: 'USER_NOT_FOUND'; userId: string }
+  | { type: 'VALIDATION_ERROR'; fields: string[] }
+  | { type: 'API_ERROR'; status: number };
+
+const result = await fetchJson<User, MyError>('https://api.example.com/users/1', {
+  mapError: (status, body) => {
+    if (status === 404) {
+      return { type: 'USER_NOT_FOUND', userId: body?.userId ?? 'unknown' };
+    }
+    if (status === 400) {
+      return { type: 'VALIDATION_ERROR', fields: body?.errors ?? [] };
+    }
+    return { type: 'API_ERROR', status };
+  },
+});
+```
+
+**In Workflows:**
+
+```typescript
+const workflow = createWorkflow({
+  fetchUser: (id: string) => fetchJson<User>(`/api/users/${id}`),
+  fetchPosts: (userId: string) => fetchJson<Post[]>(`/api/users/${userId}/posts`),
+});
+
+const result = await workflow(async (step, deps) => {
+  const user = await step('getUser', () => deps.fetchUser('1'));
+  const posts = await step('getPosts', () => deps.fetchPosts(user.id));
+  return { user, posts };
+});
+// Error type automatically includes: NOT_FOUND | BAD_REQUEST | ... | UnexpectedError
+```
+
+**Limitations vs Effect HttpClient:**
+- Less configurability (interceptors, retry policies built into client)
+- No request/response middleware pipeline
+- Simpler API for common use cases
+
+#### step.sleep() with Duration Support (v1.11.0)
+
+Cancellation-aware delays with human-readable duration strings:
+
+```typescript
+import { run } from 'awaitly/run';
+import { seconds, minutes, hours, days, ms } from 'awaitly/duration';
+
+await run(async (step) => {
+  // String duration syntax (human-readable) — ID first, then duration
+  await step.sleep('delay', '5s');        // 5 seconds
+  await step.sleep('delay', '1m');        // 1 minute
+  await step.sleep('delay', '1m 30s');    // 1 minute 30 seconds
+  await step.sleep('delay', '2h 15m');    // 2 hours 15 minutes
+  await step.sleep('delay', '500ms');     // 500 milliseconds
+
+  // Duration helpers (composable)
+  await step.sleep('delay', seconds(5));
+  await step.sleep('delay', minutes(1));
+  await step.sleep('delay', hours(2));
+  await step.sleep('delay', ms(500));
+
+  // Combined durations
+  await step.sleep('delay', minutes(1) + seconds(30));
+});
+```
+
+**AbortSignal Cancellation:**
+
+```typescript
+const controller = new AbortController();
+
+// Cancel after 5 seconds
+setTimeout(() => controller.abort(), 5000);
+
+const result = await run(async (step) => {
+  await step.sleep('delay', '10s', { signal: controller.signal });
+  return 'completed';
+}, { signal: controller.signal });
+
+if (!result.ok) {
+  console.log('Sleep was cancelled');
+}
+```
+
+**Caching with Key:**
+
+```typescript
+await run(async (step) => {
+  // Rate-limit delay that can be resumed
+  await step.sleep('delay', '5s', { key: 'rate-limit-delay' });
+
+  // If workflow resumes, cached sleeps are skipped
+  // (the delay is considered "already waited")
+});
+```
+
+**Use Cases:**
+- Rate limiting between API calls
+- Polling with backoff
+- Scheduled tasks within workflows
+- Graceful shutdown with timeout
+
+#### ESLint Plugin (eslint-plugin-awaitly v0.5.0)
+
+Catch common Awaitly mistakes at compile time:
+
+```javascript
+// eslint.config.mjs
+import awaitlyPlugin from 'eslint-plugin-awaitly';
+
+export default [
+  {
+    files: ['**/*.ts'],
+    plugins: { awaitly: awaitlyPlugin },
+    rules: {
+      // Prevents step(fn()) - must be step(() => fn())
+      'awaitly/no-immediate-execution': 'error',
+
+      // Requires thunk when using key option (for caching)
+      'awaitly/require-thunk-for-key': 'error',
+
+      // Warns about dynamic cache keys that may cause issues
+      'awaitly/stable-cache-keys': 'warn',
+
+      // Ensures workflows are awaited (no floating promises)
+      'awaitly/no-floating-workflow': 'error',
+
+      // Ensures Results are handled (like neverthrow/must-use-result)
+      'awaitly/no-floating-result': 'error',
+
+      // Enforces .ok checks before accessing .value
+      'awaitly/require-result-handling': 'warn',
+
+      // Prevents options on executor instead of step
+      'awaitly/no-options-on-executor': 'error',
+
+      // Prevents ok(ok(...)) double wrapping
+      'awaitly/no-double-wrap-result': 'error',
+    },
+  },
+];
+```
+
+**Rule Details:**
+
+| Rule | Description | Fixable |
+|------|-------------|---------|
+| `no-immediate-execution` | Prevents `step(fn())` which executes immediately, not lazily | No |
+| `require-thunk-for-key` | Requires `step(() => fn(), { key })` when using cache key | No |
+| `stable-cache-keys` | Warns about `key: \`user:${Math.random()}\`` patterns | No |
+| `no-floating-workflow` | Ensures `createWorkflow(...)` is awaited | No |
+| `no-floating-result` | Ensures `Result` values are checked or used | No |
+| `require-result-handling` | Warns when accessing `.value` without `.ok` check | No |
+| `no-options-on-executor` | Prevents `workflow(async (step) => {}, { retry })` | Yes |
+| `no-double-wrap-result` | Prevents `ok(ok(value))` or `err(err(e))` | Yes |
+
+**Example Violations:**
+
+```typescript
+// ❌ no-immediate-execution
+await step('getUser', fetchUser('1')); // Executes immediately!
+// ✅ Fix
+await step('getUser', () => fetchUser('1'));
+
+// ❌ require-thunk-for-key
+await step('getUser', deps.fetchUser('1'), { key: 'user' }); // Can't cache without thunk
+// ✅ Fix
+await step('getUser', () => deps.fetchUser('1'), { key: 'user' });
+
+// ❌ no-floating-result
+const result = await fetchUser('1');
+console.log(result.value); // Might be undefined!
+// ✅ Fix
+const result = await fetchUser('1');
+if (result.ok) {
+  console.log(result.value);
+}
+
+// ❌ no-double-wrap-result
+return ok(ok(value)); // Double wrapped!
+// ✅ Fix
+return ok(value);
+```
+
+**Limitations:**
+- Plugin is newer, may have edge cases with complex type inference
+- Some rules are heuristic-based and may have false positives
+- Requires ESLint 9+ flat config
+
 #### Human-in-the-Loop (HITL)
 
 Pause workflows for human approval and resume after:
@@ -951,15 +1335,15 @@ const result = await orchestrator.execute(
   ({ resumeState, onEvent }) =>
     createWorkflow(deps, { resumeState, onEvent }),
   async (step, deps, input) => {
-    const order = await step(() => deps.createOrder(input));
+    const order = await step('createOrder', () => deps.createOrder(input));
 
     // Pause for approval if order > $10,000
     if (order.total > 10000) {
       const approval = await requireManagerApproval(step, order.id);
-      await step(() => deps.logApproval(order.id, approval.approvedBy));
+      await step('logApproval', () => deps.logApproval(order.id, approval.approvedBy));
     }
 
-    await step(() => deps.processOrder(order.id));
+    await step('processOrder', () => deps.processOrder(order.id));
     return { orderId: order.id };
   },
   { items: [...], total: 15000 }
@@ -1252,8 +1636,8 @@ Think of yourself as a conductor leading an orchestra. You don't play every inst
 ```typescript
 // The conductor coordinates the performance
 workflow(async (step, deps) => {
-  const user = await step(() => deps.fetchUser(id));    // Violin section
-  const posts = await step(() => deps.fetchPosts(id));  // Brass section
+  const user = await step('fetchUser', () => deps.fetchUser(id));    // Violin section
+  const posts = await step('fetchPosts', () => deps.fetchPosts(id));  // Brass section
   return { user, posts };                                // Final bow
 });
 ```
@@ -1737,8 +2121,8 @@ describe('durable execution', () => {
         },
       },
       async (step, deps) => {
-        await step(() => deps.step1(), { key: 'step1' });
-        await step(() => deps.step2(), { key: 'step2' });
+        await step('step1', () => deps.step1(), { key: 'step1' });
+        await step('step2', () => deps.step2(), { key: 'step2' });
         return 'done';
       },
       { id: 'test-workflow', store, signal: controller.signal }
@@ -1754,8 +2138,8 @@ describe('durable execution', () => {
         step2: () => { callCounts.step2++; return ok({ id: '2' }); },
       },
       async (step, deps) => {
-        await step(() => deps.step1(), { key: 'step1' });
-        await step(() => deps.step2(), { key: 'step2' });
+        await step('step1', () => deps.step1(), { key: 'step1' });
+        await step('step2', () => deps.step2(), { key: 'step2' });
         return 'done';
       },
       { id: 'test-workflow', store }
@@ -1830,9 +2214,9 @@ describe('human-in-the-loop', () => {
       'test-workflow',
       ({ resumeState, onEvent }) => createWorkflow(deps, { resumeState, onEvent }),
       async (step, deps, input) => {
-        await step(() => deps.createOrder(input));
+        await step('createOrder', () => deps.createOrder(input));
         // This step will pause for approval
-        await step(() => pendingApproval('Needs manager approval'));
+        await step('pendingApproval', () => pendingApproval('Needs manager approval'));
         return 'completed';
       },
       { orderId: '123' }
@@ -1955,6 +2339,11 @@ Both Awaitly and Effect provide production-grade reliability features, but with 
 | **Policies** | `servicePolicies` + registry | Via `Schedule` |
 | **Human-in-the-Loop** | `createHITLOrchestrator` (built-in) | Custom implementation required |
 | **Singleflight** | `singleflight()` with TTL caching | Custom implementation required |
+| **Streaming** | `awaitly/streaming` with transformers | Effect Stream (more powerful) |
+| **Functional Utils** | `awaitly/functional` (pipe/flow/R) | Built-in pipe/flow |
+| **HTTP Client** | `awaitly/fetch` (fetchJson, etc.) | HttpClient (more configurable) |
+| **Sleep/Duration** | `step.sleep('id', '5s')` | `Effect.sleep(Duration.seconds(5))` |
+| **ESLint Plugin** | `eslint-plugin-awaitly` (8 rules) | `@effect/eslint-plugin` |
 | **Dependency Injection** | Dependencies object to workflow | Layers and Context |
 | **Structured Concurrency** | Via `step.parallel()` | Built-in with fibers |
 | **Observability** | `onEvent` callback | Built-in tracing and metrics |
@@ -2149,7 +2538,7 @@ const customBreaker = createCircuitBreaker('payment-api', {
 const result = await workflow(async (step, deps) => {
   // executeResult returns a Result, integrates cleanly with workflows
   const data = await breaker.executeResult(() =>
-    step(() => deps.callExternalService())
+    step('callExternalService', () => deps.callExternalService())
   );
 
   if (!data.ok && isCircuitOpenError(data.error)) {
@@ -2408,12 +2797,12 @@ const limiter = createCombinedLimiter('api', {
 const result = await workflow(async (step, deps) => {
   // Rate-limited call
   const data = await apiLimiter.execute(() =>
-    step(() => deps.callApi())
+    step('callApi', () => deps.callApi())
   );
 
   // Batch with concurrency control
   const items = await dbLimiter.executeAll(
-    ids.map((id) => () => step(() => deps.fetchItem(id)))
+    ids.map((id) => () => step('fetchItem', () => deps.fetchItem(id)))
   );
 
   return { data, items };
@@ -2527,19 +2916,19 @@ const orchestrator = createHITLOrchestrator({
 
 const processHighValueOrder = async (order) => {
   return orchestrator.execute('high-value-order', workflowFactory, async (step, deps, input) => {
-    const validated = await step(() => deps.validateOrder(input));
+    const validated = await step('validateOrder', () => deps.validateOrder(input));
 
     if (validated.total > 100000) {
-      await step(() => pendingApproval('VP approval required'), {
+      await step('pendingApproval', () => pendingApproval('VP approval required'), {
         key: `vp-approval:${input.orderId}`,
       });
     } else if (validated.total > 10000) {
-      await step(() => pendingApproval('Manager approval required'), {
+      await step('pendingApproval', () => pendingApproval('Manager approval required'), {
         key: `manager-approval:${input.orderId}`,
       });
     }
 
-    await step(() => deps.processPayment(validated));
+    await step('processPayment', () => deps.processPayment(validated));
     return { orderId: input.orderId, status: 'completed' };
   }, order);
 };

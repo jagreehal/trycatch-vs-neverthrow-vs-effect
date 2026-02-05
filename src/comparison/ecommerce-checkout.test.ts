@@ -211,63 +211,61 @@ export async function checkoutWorkflow(
   });
 
   return workflow(async (step) => {
-    const validatedCart = await step(() => validateCart(cart), {
-      name: 'Validate cart',
+    const validatedCart = await step('validateCart', () => validateCart(cart), {
+      description: 'Validate cart',
       key: `validate:${cart.userId}`,
     });
 
     const inventoryChecks = await step.fromResult(
+      'checkInventory',
       () => allAsync(
-        validatedCart.items.map(item =>
+        validatedCart.items.map((item: { productId: string; quantity: number }) =>
           checkInventory(item.productId, item.quantity)
         )
       ),
       {
-        onError: (error): InventoryError => {
-          // Since checkInventory uses tryAsync, PromiseRejectedError shouldn't occur
-          // but we handle it defensively by mapping to a domain error
+        onError: (error: unknown): InventoryError => {
           if (isPromiseRejectedError(error)) {
             return 'OUT_OF_STOCK';
           }
-          return error;
+          return error as InventoryError;
         },
-        name: 'Check inventory',
         key: `inventory:${cart.userId}`,
       }
     );
 
     const pricingChecks = await step.fromResult(
+      'getPricing',
       () => allAsync(
-        validatedCart.items.map(item =>
+        validatedCart.items.map((item: { productId: string; quantity: number }) =>
           getPricing(item.productId)
         )
       ),
       {
-        onError: (error): PricingError => {
+        onError: (error: unknown): PricingError => {
           if (isPromiseRejectedError(error)) {
             return 'PRICING_UNAVAILABLE';
           }
-          return error;
+          return error as PricingError;
         },
-        name: 'Get pricing',
         key: `pricing:${cart.userId}`,
       }
     );
 
     await step.fromResult(
+      'reserveInventory',
       () => allAsync(
-        validatedCart.items.map(item =>
+        validatedCart.items.map((item: { productId: string; quantity: number }) =>
           reserveInventory(item.productId, item.quantity)
         )
       ),
       {
-        onError: (error): InventoryError => {
+        onError: (error: unknown): InventoryError => {
           if (isPromiseRejectedError(error)) {
             return 'OUT_OF_STOCK';
           }
-          return error;
+          return error as InventoryError;
         },
-        name: 'Reserve inventory',
         key: `reserve:${cart.userId}`,
       }
     );
@@ -276,15 +274,16 @@ export async function checkoutWorkflow(
       return sum + price.amount * validatedCart.items[i].quantity;
     }, 0);
 
-    const payment = await step(() => processPayment(paymentMethod, total), {
-      name: 'Process payment',
+    const payment = await step('processPayment', () => processPayment(paymentMethod, total), {
+      description: 'Process payment',
       key: `payment:${paymentMethod.id}:${total}`,
     });
 
     const order = await step(
+      'createOrder',
       () => createOrder(cart.userId, validatedCart.items, total, payment.transactionId),
       {
-        name: 'Create order',
+        description: 'Create order',
         key: `order:${payment.transactionId}`,
       }
     );
