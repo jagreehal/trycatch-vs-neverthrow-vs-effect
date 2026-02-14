@@ -17,9 +17,9 @@ The main advantage here is **Automatic Error Inference**. The checkout process c
 import { createWorkflow } from 'awaitly/workflow';
 import { allAsync, isPromiseRejectedError } from 'awaitly';
 
-const workflow = createWorkflow({ validateCart, checkInventory, getPricing, ... });
+const workflow = createWorkflow('checkout', { validateCart, checkInventory, getPricing, ... });
 
-return workflow(async (step, deps) => {
+return workflow(async ({ step, deps }) => {
   // Parallel execution with error handling
   const inventoryChecks = await step.fromResult(
     () => allAsync(
@@ -56,20 +56,22 @@ import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
 
 const checkout = createSagaWorkflow({ reserveInventory, chargeCard, scheduleShipping });
 
-const result = await checkout(async (saga, deps) => {
+const result = await checkout(async ({ saga, deps }) => {
   const reservation = await saga.step(
+    'reserveInventory',
     () => deps.reserveInventory(items),
     { compensate: (res) => releaseInventory(res.id) }
   );
 
   const payment = await saga.step(
+    'chargeCard',
     () => deps.chargeCard(amount),
     { compensate: (p) => refundPayment(p.transactionId) }
   );
 
   // If shipping fails, compensations run automatically in reverse order:
   // 1. refundPayment, 2. releaseInventory
-  await saga.step(() => deps.scheduleShipping(reservation.id));
+  await saga.step('scheduleShipping', () => deps.scheduleShipping(reservation.id));
 
   return { reservation, payment };
 });
@@ -173,15 +175,17 @@ const checkout = createSagaWorkflow({
   scheduleShipping,
 });
 
-const result = await checkout(async (saga, deps) => {
+const result = await checkout(async ({ saga, deps }) => {
   // Check inventory with typed error
   const inventory = await saga.step(
+    'checkInventory',
     () => deps.checkInventory(item.productId, item.quantity),
     { compensate: (inv) => releaseInventory(inv.reserved!) }
   );
 
   // Process payment with typed error
   const payment = await saga.step(
+    'processPayment',
     () => deps.processPayment({ amount, card }),
     { compensate: (p) => refundPayment(p.transactionId) }
   );

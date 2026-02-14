@@ -10,12 +10,12 @@ A gradual migration guide for teams already using neverthrow who want to adopt A
 - Railway-oriented programming
 
 **Add what Awaitly provides:**
-- **Automatic error type inference** — No more manual union types
-- **Async/await syntax** — Familiar imperative style with `step()`
-- **Built-in workflows** — Caching, resume state, HITL
-- **Policies and resilience** — Retries, timeouts, circuit breakers
-- **Streaming** — Result-aware stream processing
-- **Functional utilities** — `pipe`, `flow`, `R.*` helpers
+- **Automatic error type inference**: No more manual union types
+- **Async/await syntax**: Familiar imperative style with `step()`
+- **Built-in workflows**: Caching, resume state, HITL
+- **Policies and resilience**: Retries, timeouts, circuit breakers
+- **Streaming**: Result-aware stream processing
+- **Functional utilities**: `pipe`, `flow`, `R.*` helpers
 
 ## Quick Comparison
 
@@ -50,7 +50,7 @@ const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND' | 'FETCH_ERR
 };
 
 // Usage: Async/await with step()
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser('1'));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   return posts.length;
@@ -105,12 +105,12 @@ const fromNeverthrow = async <T, E>(
 };
 
 // New workflow using both
-const checkoutWorkflow = createWorkflow({
+const checkoutWorkflow = createWorkflow('checkout', {
   validateCart,
   processPayment,
 });
 
-const result = await checkoutWorkflow(async (step, deps) => {
+const result = await checkoutWorkflow(async ({ step, deps }) => {
   // Use legacy neverthrow function via interop
   const user = await step('getUser', () => fromNeverthrow(getUser(userId)));
 
@@ -150,7 +150,7 @@ const validateEmail = (email: string): Result<string, 'INVALID_EMAIL'> =>
   email.includes('@') ? ok(email) : err('INVALID_EMAIL');
 
 const createUser = async (data: UserInput): AsyncResult<User, 'INVALID_EMAIL' | 'DB_ERROR'> =>
-  run(async (step) => {
+  run(async ({ step }) => {
     const email = await step('validateEmail', () => validateEmail(data.email));
 
     const user = await step.try(
@@ -189,14 +189,14 @@ export const chargeCard = async (input: PaymentInput): AsyncResult<ChargeResult,
 export const recordTransaction = async (charge: ChargeResult): AsyncResult<Transaction, DbError> => { ... };
 
 // Error type automatically inferred!
-export const processPayment = createWorkflow({
+export const processPayment = createWorkflow('processPayment', {
   validatePayment,
   chargeCard,
   recordTransaction,
 });
 
 // Usage
-const result = await processPayment(async (step, deps) => {
+const result = await processPayment(async ({ step, deps }) => {
   const input = await step('validatePayment', () => deps.validatePayment(data));
   const charge = await step('chargeCard', () => deps.chargeCard(input));
   const transaction = await step('recordTransaction', () => deps.recordTransaction(charge));
@@ -278,10 +278,10 @@ const user = await step('getUser', () => fetchUser(id));
 
 Don't migrate everything! Keep neverthrow when:
 
-1. **The code is stable and working** — "If it ain't broke, don't fix it"
-2. **You prefer method chaining** — Some teams find `.andThen().map()` more readable
-3. **You don't need workflows** — Simple Result functions don't benefit from `createWorkflow`
-4. **Library code** — Consumers might expect neverthrow types
+1. **The code is stable and working**: "If it ain't broke, don't fix it"
+2. **You prefer method chaining**: Some teams find `.andThen().map()` more readable
+3. **You don't need workflows**: Simple Result functions don't benefit from `createWorkflow`
+4. **Library code**: Consumers might expect neverthrow types
 
 ## Migration Checklist
 
@@ -318,7 +318,7 @@ fetchUser(id)
   .mapErr(e => new ApiError(e));
 
 // awaitly
-await run(async (step) => {
+await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser(id));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   const enriched = await step('enrichPosts', () => enrichPosts(posts));
@@ -356,8 +356,8 @@ ResultAsync.combine([
   fetchComments(userId),
 ]);
 
-// awaitly
-await step.parallel({
+// awaitly (name first, then operations object)
+await step.parallel('Fetch user data', {
   user: () => fetchUser(userId),
   posts: () => fetchPosts(userId),
   comments: () => fetchComments(userId),
@@ -388,8 +388,8 @@ await step.try(
 
 ## Tips
 
-1. **Start with new code** — Don't rush to rewrite working neverthrow code
-2. **Use interop freely** — The helpers have minimal overhead
-3. **Leverage workflows** — The real value of Awaitly is in `createWorkflow` for complex flows
-4. **Keep types explicit during migration** — Add return types to catch interop issues early
-5. **Test thoroughly** — Both libraries have the same Result semantics, but subtle bugs can creep in
+1. **Start with new code**: Don't rush to rewrite working neverthrow code
+2. **Use interop freely**: The helpers have minimal overhead
+3. **Leverage workflows**: The real value of Awaitly is in `createWorkflow` for complex flows
+4. **Keep types explicit during migration**: Add return types to catch interop issues early
+5. **Test thoroughly**: Both libraries have the same Result semantics, but subtle bugs can creep in

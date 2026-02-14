@@ -140,7 +140,7 @@ const store = createMemoryStreamStore<string>();
 
 const result = await durable.run(
   { parseLine, validateLine, saveBatch },
-  async (step, deps) => {
+  async ({ step, deps }) => {
     // Get readable stream
     const readable = await step.getReadable(store, { key: 'input' });
 

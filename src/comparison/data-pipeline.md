@@ -14,7 +14,7 @@ Awaitly excels here because caching and resume state are first-class features. Y
 
 ```typescript
 // Built-in caching and resume
-return workflow(async (step, deps) => {
+return workflow(async ({ step, deps }) => {
   const user = await step(
     'fetchUser',
     () => deps.fetchUser(userId),
@@ -91,7 +91,7 @@ const rateLimiter = createRateLimiter('api', { maxPerSecond: 10 });
 // Durable execution with automatic resume
 const result = await durable.run(
   { fetchUser, fetchPosts, fetchComments },
-  async (step, deps) => {
+  async ({ step, deps }) => {
     const user = await step(
       'fetchUser',
       () => deps.fetchUser(userId),
@@ -152,7 +152,7 @@ const store = createMemoryStreamStore<string>();
 
 const result = await durable.run(
   { processLine, validateLine, enrichLine },
-  async (step, deps) => {
+  async ({ step, deps }) => {
     // Get readable stream from source
     const readable = await step.getReadable(store, { key: 'input-stream' });
 

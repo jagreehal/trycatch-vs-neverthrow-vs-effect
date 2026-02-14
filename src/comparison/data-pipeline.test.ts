@@ -144,13 +144,13 @@ export async function dataPipelineWorkflow(
     resumeState?: { steps: Map<string, SavedStepEntry> };
   }
 ): AsyncResult<Analytics, FetchError | ProcessError | UnexpectedError> {
-  const workflow = createWorkflow({ fetchUser, fetchPosts, fetchComments, processAnalytics }, {
+  const workflow = createWorkflow('dataPipeline', { fetchUser, fetchPosts, fetchComments, processAnalytics }, {
     cache: options?.cache,
     onEvent: options?.onEvent,
     resumeState: options?.resumeState as any,
   });
 
-  return workflow(async (step) => {
+  return workflow(async ({ step }) => {
     const user = await step(
       'fetchUser',
       () => fetchUser(userId),

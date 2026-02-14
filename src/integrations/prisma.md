@@ -4,9 +4,9 @@ Turn Prisma database errors into typed Results for exhaustive error handling.
 
 ## Why Combine Them?
 
-- **Exhaustive error handling** — Handle `NOT_FOUND`, `UNIQUE_VIOLATION`, etc. explicitly
-- **No more try/catch spaghetti** — Database operations compose cleanly in workflows
-- **Type-safe error codes** — Prisma's error codes become typed union members
+- **Exhaustive error handling**: Handle `NOT_FOUND`, `UNIQUE_VIOLATION`, etc. explicitly
+- **No more try/catch spaghetti**: Database operations compose cleanly in workflows
+- **Type-safe error codes**: Prisma's error codes become typed union members
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ const findUser = async (id: string): AsyncResult<User, DbError> => {
 };
 
 // Use in a workflow
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const user = await step('findUser', () => findUser('user-123'));
   return user;
 }, { onError: () => {} });
@@ -172,7 +172,7 @@ const CreateUserSchema = z.object({
 });
 
 const createUser = async (rawInput: unknown) => {
-  return run(async (step) => {
+  return run(async ({ step }) => {
     // Validate input
     const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawInput));
 
@@ -343,7 +343,7 @@ const hashPassword = async (password: string): Promise<string> => {
 
 // Sign up workflow
 const signUp = async (rawInput: unknown): AsyncResult<{ id: string; email: string; name: string }, SignUpError> => {
-  return run(async (step) => {
+  return run(async ({ step }) => {
     // Step 1: Validate input
     const input = await step('validateInput', () => zodToResult(SignUpSchema, rawInput));
 
@@ -555,8 +555,8 @@ export const findOrNotFound = async <T>(
 
 ## Tips
 
-1. **Use `findUniqueOrThrow`** — It throws P2025, which you can map to `NOT_FOUND`
-2. **Check `e.meta`** — Prisma includes useful metadata like the violated field
-3. **Create entity-specific errors** — `USER_NOT_FOUND` is clearer than `NOT_FOUND`
-4. **Log original errors** — Keep the raw Prisma error for debugging while returning typed errors
-5. **Consider transactions** — Use `prisma.$transaction` inside the wrapper for atomic operations
+1. **Use `findUniqueOrThrow`**: It throws P2025, which you can map to `NOT_FOUND`
+2. **Check `e.meta`**: Prisma includes useful metadata like the violated field
+3. **Create entity-specific errors**: `USER_NOT_FOUND` is clearer than `NOT_FOUND`
+4. **Log original errors**: Keep the raw Prisma error for debugging while returning typed errors
+5. **Consider transactions**: Use `prisma.$transaction` inside the wrapper for atomic operations

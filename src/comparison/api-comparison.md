@@ -62,9 +62,9 @@ Uses standard `async/await` with a `step()` wrapper. The `step` function automat
 ```typescript
 import { createWorkflow } from 'awaitly/workflow';
 
-const loadUserData = createWorkflow({ fetchUser, fetchPosts });
+const loadUserData = createWorkflow('loadUserData', { fetchUser, fetchPosts });
 
-const result = await loadUserData(async (step, deps) => {
+const result = await loadUserData(async ({ step, deps }) => {
   const user = await step('getUser', () => deps.fetchUser('1'));
   const posts = await step('getPosts', () => deps.fetchPosts(user.id));
   return { user, posts };
@@ -109,7 +109,7 @@ Strongly typed. Errors are tracked in the second type parameter `Effect<Success,
 ```typescript
 import { createWorkflow } from 'awaitly/workflow';
 
-const myWorkflow = createWorkflow({ fetchUser, fetchPosts });
+const myWorkflow = createWorkflow('myWorkflow', { fetchUser, fetchPosts });
 // TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR'
 ```
 
@@ -181,13 +181,10 @@ const results = await step.fromResult(
 );
 
 // For named parallel operations, use step.parallel
-const { users, posts } = await step.parallel(
-  {
-    users: () => deps.fetchUsers(),
-    posts: () => deps.fetchPosts(),
-  },
-  { name: 'Fetch data' }
-);
+const { users, posts } = await step.parallel('Fetch data', {
+  users: () => deps.fetchUsers(),
+  posts: () => deps.fetchPosts(),
+});
 ```
 
 ---
@@ -214,7 +211,7 @@ fetchUser('999').pipe(
 Get the raw result, check it, then unwrap with `step()` if needed. Or use `match` helper for pattern matching.
 ```typescript
 // Inline recovery inside workflow
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   const userResult = await deps.fetchUser('999');
   
   if (!userResult.ok && userResult.error === 'NOT_FOUND') {

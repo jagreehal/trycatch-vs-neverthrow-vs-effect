@@ -201,7 +201,7 @@ export async function checkoutWorkflow(
   cart: Cart,
   paymentMethod: PaymentMethod
 ): AsyncResult<Order, CheckoutError | UnexpectedError> {
-  const workflow = createWorkflow({
+  const workflow = createWorkflow('checkout', {
     validateCart,
     checkInventory,
     getPricing,
@@ -210,7 +210,7 @@ export async function checkoutWorkflow(
     createOrder,
   });
 
-  return workflow(async (step) => {
+  return workflow(async ({ step }) => {
     const validatedCart = await step('validateCart', () => validateCart(cart), {
       description: 'Validate cart',
       key: `validate:${cart.userId}`,

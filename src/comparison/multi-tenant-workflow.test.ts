@@ -173,7 +173,7 @@ const sendBillingNotification = (
 export async function multiTenantWorkflow(
   tenantId: TenantId
 ): AsyncResult<Usage, MultiTenantError | UnexpectedError> {
-  const workflow = createWorkflow({
+  const workflow = createWorkflow('multiTenant', {
     fetchTenant,
     fetchUsers,
     fetchResources,
@@ -181,22 +181,17 @@ export async function multiTenantWorkflow(
     sendBillingNotification,
   });
 
-  return workflow(async (step) => {
+  return workflow(async ({ step }) => {
     const tenant = await step('fetchTenant', () => fetchTenant(tenantId), {
       description: 'Fetch tenant',
       key: `tenant:${tenantId}`,
     });
 
     if (tenant.plan !== 'free') {
-      const { users, resources } = await step.parallel(
-        {
-          users: () => fetchUsers(tenantId),
-          resources: () => fetchResources(tenantId),
-        },
-        {
-          name: 'Fetch tenant data',
-        }
-      );
+      const { users, resources } = await step.parallel('Fetch tenant data', {
+        users: () => fetchUsers(tenantId),
+        resources: () => fetchResources(tenantId),
+      });
 
       const usage = await step(
         'calculateUsage',

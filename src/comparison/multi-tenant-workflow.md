@@ -14,7 +14,7 @@ Since Awaitly uses standard `async/await`, you can use standard JavaScript contr
 
 ```typescript
 // It's just standard code!
-return workflow(async (step, deps) => {
+return workflow(async ({ step, deps }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId), {
     description: 'Fetch tenant',
     key: `tenant:${tenantId}`,
@@ -27,12 +27,10 @@ if (tenant.plan === 'free') {
     { description: 'Calculate usage (free plan)', key: `usage:${tenantId}:free` }
   );
 } else {
-  const { users, resources } = await step.parallel(
-    {
-      users: () => deps.fetchUsers(tenantId),
-      resources: () => deps.fetchResources(tenantId),
-    },
-    { name: 'Fetch tenant data' }
+  const { users, resources } = await step.parallel('Fetch tenant data', {
+    users: () => deps.fetchUsers(tenantId),
+    resources: () => deps.fetchResources(tenantId),
+  }
   );
   
   const usage = await step(
@@ -72,7 +70,7 @@ import { createHITLOrchestrator, pendingApproval } from 'awaitly/hitl';
 
 const orchestrator = createHITLOrchestrator({ approvalStore, workflowStateStore });
 
-await orchestrator.execute('plan-upgrade', workflowFactory, async (step, deps, input) => {
+await orchestrator.execute('plan-upgrade', workflowFactory, async ({ step, deps, args: input }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(input.tenantId));
 
   if (tenant.plan === 'enterprise' && input.newPlan === 'custom') {
@@ -146,14 +144,14 @@ For multi-tenant workflows that need rate limiting between API calls:
 import { createWorkflow } from 'awaitly/workflow';
 import { seconds, minutes } from 'awaitly/duration';
 
-const processTenants = createWorkflow({
+const processTenants = createWorkflow('processTenants', {
   fetchTenants,
   processUsage,
   sendNotification,
   syncToDataWarehouse,
 });
 
-const result = await processTenants(async (step, deps) => {
+const result = await processTenants(async ({ step, deps }) => {
   const tenants = await step('fetchTenants', () => deps.fetchTenants(), {
     name: 'Fetch all tenants',
     key: 'fetch-tenants',
@@ -222,9 +220,9 @@ const processTenantUsage = flow(
 );
 
 // Use in workflow
-const workflow = createWorkflow({ processTenantUsage, sendBilling });
+const workflow = createWorkflow('workflow', { processTenantUsage, sendBilling });
 
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId));
 
   // Compose validation pipeline

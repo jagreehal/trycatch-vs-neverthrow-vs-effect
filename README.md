@@ -24,7 +24,7 @@ Each step in this system fails in its own special way. To handle them properly, 
 
 This is where our four approaches start to diverge. What you're really choosing isn't just a library; you're choosing whether your error handling is exception-based, explicit Result-based, or Result-based with orchestration and policies on top.
 
-(In practice, some errors overlap categories—for example, a provider 4xx is a dependency error, but it's often treated as a domain-level "hard fail" in business logic.)
+(In practice, some errors overlap categories: for example, a provider 4xx is a dependency error, but it's often treated as a domain-level "hard fail" in business logic.)
 
 **The Goal: Three Criteria for Great Error Handling**
 
@@ -310,7 +310,7 @@ return parse(raw)
 
 It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
 
-**Note:** These advantages (honest signatures, natural composition, errors as data) apply equally to Awaitly—both libraries implement railway-oriented programming with Result types. The difference is syntax: neverthrow uses method chaining (`.andThen()`), while Awaitly uses `step()` with async/await. If your team prefers async/await flows, Awaitly lets you keep that syntax while still getting early-exit error propagation.
+**Note:** These advantages (honest signatures, natural composition, errors as data) apply equally to Awaitly. Both libraries implement railway-oriented programming with Result types. The difference is syntax: neverthrow uses method chaining (`.andThen()`), while Awaitly uses `step()` with async/await. If your team prefers async/await flows, Awaitly lets you keep that syntax while still getting early-exit error propagation.
 
 **Errors are data, not control flow**
 
@@ -448,7 +448,7 @@ Same retry logic everywhere. Consistent error handling across your entire app. W
 
 What if you could write code that looks like async/await (familiar to everyone) but with the type safety of Result types? What if your functions were honest about failure, but you didn't have to learn monadic chains or generator syntax?
 
-Welcome to Awaitly, where `step()` unwraps Results and exits early on error—automatically.
+Welcome to Awaitly, where `step()` unwraps Results and exits early on error, automatically.
 
 ```typescript
 import { ok, err, type AsyncResult } from 'awaitly';
@@ -464,7 +464,7 @@ const saveToDatabase = async (result: ChargeResult): AsyncResult<void, DatabaseE
   ok(undefined);
 
 // Clean imperative workflow with run()
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const payment = await step('validatePayment', () => validatePayment(data)); // Unwraps Result, exits early on error
   const charge = await step('chargeCustomer', () => chargeCustomer(payment)); // Only runs if validation succeeded
   await step('saveToDatabase', () => saveToDatabase(charge));                  // Only runs if charge succeeded
@@ -481,9 +481,9 @@ For complex workflows needing caching, resume state, or automatic error inferenc
 import { createWorkflow } from 'awaitly/workflow';
 
 // Declare dependencies → error union computed automatically
-const makePayment = createWorkflow({ validatePayment, chargeCustomer, saveToDatabase });
+const makePayment = createWorkflow('makePayment', { validatePayment, chargeCustomer, saveToDatabase });
 
-const result = await makePayment(async (step, deps) => {
+const result = await makePayment(async ({ step, deps }) => {
   const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' }); // Cached
   const charge = await step('chargeCustomer', () => deps.chargeCustomer(payment), { key: 'charge' });
   await step('saveToDatabase', () => deps.saveToDatabase(charge), { key: 'save' });
@@ -499,9 +499,9 @@ const result = await makePayment(async (step, deps) => {
 The scariest failure mode is "provider charge succeeded, but persistence failed." If you retry the whole workflow naïvely, you risk charging the customer twice. With step keys, you can safely resume without repeating side effects.
 
 ```typescript
-const makePayment = createWorkflow({ validatePayment, callProvider, persistSuccess });
+const makePayment = createWorkflow('makePayment', { validatePayment, callProvider, persistSuccess });
 
-const result = await makePayment(async (step, deps) => {
+const result = await makePayment(async ({ step, deps }) => {
   const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' });
 
   // Never repeat this once it succeeds:
@@ -611,7 +611,7 @@ Use Awaitly when you want the type safety of Result types with the familiar synt
 Write normal async/await code, and `step()` handles early-exit error propagation for you.
 
 ```typescript
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser('1'));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   return { user, posts };
@@ -639,7 +639,7 @@ const response = await step.try(
 You declare your functions, and the error union is computed automatically. Add a new function? The error types update automatically. Remove one? TypeScript ensures you handle the new error set.
 
 ```typescript
-const workflow = createWorkflow({ fetchUser, fetchPosts, sendEmail });
+const workflow = createWorkflow('workflow', { fetchUser, fetchPosts, sendEmail });
 // Error type: 'NOT_FOUND' | 'FETCH_ERROR' | 'EMAIL_FAILED' | UnexpectedError
 // ↑ Computed automatically, no manual union management
 ```
@@ -686,7 +686,7 @@ import { createMemoryStreamStore, map, filter, chunk, collect } from 'awaitly/st
 // Create a stream store for workflow integration
 const store = createMemoryStreamStore<string>();
 
-await run(async (step) => {
+await run(async ({ step }) => {
   const writable = await step.getWritable(store, { key: 'output' });
 
   // Transform stream with Result-aware operators
@@ -760,7 +760,7 @@ Cancellation-aware delays with human-readable duration strings:
 import { run } from 'awaitly/run';
 import { seconds, minutes } from 'awaitly/duration';
 
-await run(async (step) => {
+await run(async ({ step }) => {
   // String duration syntax (ID first, then duration)
   await step.sleep('delay', '5s');
   await step.sleep('delay', '1m 30s');
@@ -902,7 +902,7 @@ import { run } from 'awaitly/run';
 const divideWorkflow = (a: number, b: number): Result<number, Error> =>
   b === 0 ? err(new Error('Division by zero')) : ok(a / b);
 
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const x = await step('divide', () => divideWorkflow(10, 2)); // 5
   return x;
 });
@@ -942,7 +942,7 @@ Here's what I've learned after years of building systems that break in creative 
 **Errors aren't bugs: they're features.** The difference between a junior developer and a senior developer isn't that the senior writes bug-free code. It's that the senior developer has learned to design around the inevitable failure.
 
 You already have a rubric now: **Visible, Composable, Honest**.  
-Pick the trade-off you're willing to live with — because at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
+Pick the trade-off you're willing to live with: at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
 
 **There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Awaitly when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
 

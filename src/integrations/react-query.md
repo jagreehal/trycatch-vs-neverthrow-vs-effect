@@ -4,9 +4,9 @@ Combine TanStack Query's server state management with Awaitly's typed Results fo
 
 ## Why Combine Them?
 
-- **Type-safe errors in components** — Handle `NOT_FOUND`, `UNAUTHORIZED`, etc. explicitly
-- **Server returns Result, client handles** — Clean separation of concerns
-- **Works with React Server Components** — Same patterns work with RSC and server actions
+- **Type-safe errors in components**: Handle `NOT_FOUND`, `UNAUTHORIZED`, etc. explicitly
+- **Server returns Result, client handles**: Clean separation of concerns
+- **Works with React Server Components**: Same patterns work with RSC and server actions
 
 ## Quick Start
 
@@ -47,7 +47,7 @@ function UserProfile({ userId }: { userId: string }) {
 
 ### Pattern 1: Server Returns Result, Client Unwraps
 
-The foundational pattern—your server functions return `AsyncResult`, and the client unwraps them:
+The foundational pattern: your server functions return `AsyncResult`, and the client unwraps them:
 
 ```typescript
 // ============ Server Side ============
@@ -392,7 +392,7 @@ type CreateUserError =
 export const createUser = async (
   input: unknown
 ): AsyncResult<User, CreateUserError> => {
-  return run(async (step) => {
+  return run(async ({ step }) => {
     // Validate
     const data = await step('validateInput', () => zodToResult(CreateUserSchema, input));
 
@@ -663,8 +663,8 @@ const { data } = useQuery({
 
 ## Tips
 
-1. **Use `ResultError` class** — Preserves typed errors through React Query's error handling
-2. **Conditional retry** — Don't retry on business errors like `NOT_FOUND` or `UNAUTHORIZED`
-3. **Error boundaries** — Let `SERVER_ERROR` types bubble up to error boundaries
-4. **Optimistic updates** — Rollback optimistic updates when Result is an error
-5. **Server Components** — Use Results directly in RSC, no need for `useQuery`
+1. **Use `ResultError` class**: Preserves typed errors through React Query's error handling
+2. **Conditional retry**: Don't retry on business errors like `NOT_FOUND` or `UNAUTHORIZED`
+3. **Error boundaries**: Let `SERVER_ERROR` types bubble up to error boundaries
+4. **Optimistic updates**: Rollback optimistic updates when Result is an error
+5. **Server Components**: Use Results directly in RSC, no need for `useQuery`

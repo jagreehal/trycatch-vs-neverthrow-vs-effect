@@ -227,12 +227,12 @@ describe('Streaming: integration with workflows', () => {
     ): AsyncResult<number, 'SAVE_ERROR'> =>
       Promise.resolve(ok(batch.length));
 
-    const workflow = createWorkflow({ processLine, saveBatch });
+    const workflow = createWorkflow('streamProcess', { processLine, saveBatch });
 
     const lines = ['hello', 'world', 'test'];
     let totalSaved = 0;
 
-    const result = await workflow(async (step, deps) => {
+    const result = await workflow(async ({ step, deps }) => {
       // Process lines
       const processed: string[] = [];
       for (const line of lines) {
@@ -267,11 +267,11 @@ describe('Streaming: integration with workflows', () => {
         ? Promise.resolve(err('PROCESS_ERROR'))
         : Promise.resolve(ok(line.toUpperCase()));
 
-    const workflow = createWorkflow({ processLine });
+    const workflow = createWorkflow('streamProcess', { processLine });
 
     const lines = ['hello', 'bad', 'world'];
 
-    const result = await workflow(async (step, deps) => {
+    const result = await workflow(async ({ step, deps }) => {
       const processed: string[] = [];
       for (const line of lines) {
         const lineResult = await step('processLine', () => deps.processLine(line));

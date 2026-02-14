@@ -156,9 +156,9 @@ describe('2. Sequential operations', () => {
 
     it('uses step() with natural async/await', async () => {
       // Error union is AUTOMATIC - inferred from deps
-      const loadUserData = createWorkflow({ fetchUser, fetchPosts });
+      const loadUserData = createWorkflow('loadUserData', { fetchUser, fetchPosts });
 
-      const result = await loadUserData(async (step) => {
+      const result = await loadUserData(async ({ step }) => {
         const user = await step('getUser', () => fetchUser('1'));
         const userPosts = await step('getPosts', () => fetchPosts(user.id));
         return { user, posts: userPosts };
@@ -173,13 +173,13 @@ describe('2. Sequential operations', () => {
 
     it('stays flat with 3+ operations', async () => {
       // No nesting regardless of depth
-      const loadEverything = createWorkflow({
+      const loadEverything = createWorkflow('loadEverything', {
         fetchUser,
         fetchPosts,
         fetchComments,
       });
 
-      const result = await loadEverything(async (step) => {
+      const result = await loadEverything(async ({ step }) => {
         const user = await step('getUser', () => fetchUser('1'));
         const userPosts = await step('getPosts', () => fetchPosts(user.id));
         const comments = await step('getComments', () => fetchComments(userPosts[0].id));
@@ -303,13 +303,13 @@ describe('3. Error type inference', () => {
     it('infers error union from dependencies automatically', async () => {
       // NO manual type annotation needed!
       // TypeScript knows: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'DB_ERROR' | UnexpectedError
-      const signUp = createWorkflow({
+      const signUp = createWorkflow('signUp', {
         validateEmail,
         validatePassword,
         createUser,
       });
 
-      const result = await signUp(async (step, deps) => {
+      const result = await signUp(async ({ step, deps }) => {
         const email = await step('validateEmail', () => deps.validateEmail('alice@example.com'));
         const password = await step('validatePassword', () => deps.validatePassword('securepass123'));
         return await step('createUser', () => deps.createUser(email, password));
@@ -318,7 +318,7 @@ describe('3. Error type inference', () => {
       expect(result.ok).toBe(true);
 
       // Error handling with full type safety
-      const badResult = await signUp(async (step, deps) => {
+      const badResult = await signUp(async ({ step, deps }) => {
         const email = await step('validateEmail', () => deps.validateEmail('not-an-email'));
         const password = await step('validatePassword', () => deps.validatePassword('short'));
         return await step('createUser', () => deps.createUser(email, password));
@@ -420,9 +420,9 @@ describe('4. Wrapping throwing code', () => {
         .catch(() => err('OPERATION_FAILED'));
 
     it('wraps throwing code with typed error', async () => {
-      const workflow = createWorkflow({ wrappedRiskyOp });
+      const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         return await step('wrappedRiskyOp', () => deps.wrappedRiskyOp(false));
       });
 
@@ -431,9 +431,9 @@ describe('4. Wrapping throwing code', () => {
     });
 
     it('catches throws and maps to typed error', async () => {
-      const workflow = createWorkflow({ wrappedRiskyOp });
+      const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         return await step('wrappedRiskyOp', () => deps.wrappedRiskyOp(true));
       });
 
@@ -444,9 +444,9 @@ describe('4. Wrapping throwing code', () => {
     it('supports step.try with error mapping in workflow', async () => {
       // step.try is for wrapping code that throws (not Result-returning)
       // The error gets caught and workflow continues type-safely
-      const workflow = createWorkflow({ wrappedRiskyOp });
+      const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async (step) => {
+      const result = await workflow(async ({ step }) => {
         // step.try catches throws and maps them to typed errors
         return await step.try('riskyOp', () => riskyOperation(true), {
           error: 'OPERATION_FAILED',
@@ -549,24 +549,21 @@ describe('5. Parallel operations', () => {
     });
 
     it('works inside step() for complex parallel patterns', async () => {
-      const loadDashboard = createWorkflow({
+      const loadDashboard = createWorkflow('loadDashboard', {
         fetchUser,
         fetchPosts,
         fetchComments,
       });
 
-      const result = await loadDashboard(async (step, deps) => {
+      const result = await loadDashboard(async ({ step, deps }) => {
         // Fetch user first
         const user = await step('getUser', () => deps.fetchUser('1'));
 
         // Then fetch posts and comments in parallel
-        const { posts, comments } = await step.parallel(
-          {
-            posts: () => deps.fetchPosts(user.id),
-            comments: () => deps.fetchComments('p1'),
-          },
-          { name: 'Fetch posts and comments' }
-        );
+        const { posts, comments } = await step.parallel('Fetch posts and comments', {
+          posts: () => deps.fetchPosts(user.id),
+          comments: () => deps.fetchComments('p1'),
+        });
 
         return { user, posts, comments };
       });
@@ -790,9 +787,9 @@ describe('7. Error recovery', () => {
       );
 
     it('recovers using conditional logic with createWorkflow', async () => {
-      const workflow = createWorkflow({ fetchUser });
+      const workflow = createWorkflow('fetchUser', { fetchUser });
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         // Get the raw result without unwrapping
         const userResult = await deps.fetchUser('999');
 
@@ -1080,9 +1077,9 @@ describe('10. Workflow-only features', () => {
         return Promise.resolve(ok('success'));
       };
 
-      const workflow = createWorkflow({ flakyOperation });
+      const workflow = createWorkflow('flakyOperation', { flakyOperation });
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         return await step.retry('flakyOp', () => deps.flakyOperation(), {
           attempts: 5,
           backoff: 'exponential',
@@ -1103,9 +1100,9 @@ describe('10. Workflow-only features', () => {
           setTimeout(() => resolve(ok('done')), 5000)
         );
 
-      const workflow = createWorkflow({ slowOperation });
+      const workflow = createWorkflow('slowOperation', { slowOperation });
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         return await step.withTimeout('slowOp', () => deps.slowOperation(), {
           ms: 50,
         });
@@ -1128,10 +1125,10 @@ describe('10. Workflow-only features', () => {
       };
 
       const cache = new Map();
-      const workflow = createWorkflow({ expensiveOperation }, { cache });
+      const workflow = createWorkflow('expensiveOperation', { expensiveOperation }, { cache });
 
       // First run
-      await workflow(async (step, deps) => {
+      await workflow(async ({ step, deps }) => {
         const a = await step('expensiveOp', () => deps.expensiveOperation('1'), {
           key: 'op:1',
         });
@@ -1153,13 +1150,14 @@ describe('10. Workflow-only features', () => {
         Promise.resolve(ok({ id, name: 'Alice', email: 'alice@example.com' }));
 
       const workflow = createWorkflow(
+        'fetchUser',
         { fetchUser },
         {
           onEvent: (event) => events.push({ type: event.type }),
         }
       );
 
-      await workflow(async (step, deps) => {
+      await workflow(async ({ step, deps }) => {
         // Note: step_complete is emitted when a key is provided (for caching/resume)
         return await step('fetchUser', () => deps.fetchUser('1'), {
           description: 'Fetch user',
@@ -1183,13 +1181,14 @@ describe('10. Workflow-only features', () => {
         Promise.resolve(ok({ id, name: 'Alice', email: 'alice@example.com' }));
 
       const workflow = createWorkflow(
+        'fetchUser',
         { fetchUser },
         {
           onEvent: (event) => events.push({ type: event.type }),
         }
       );
 
-      await workflow(async (step, deps) => {
+      await workflow(async ({ step, deps }) => {
         return await step('fetchUser', () => deps.fetchUser('1'), { description: 'Fetch user' });
       });
 
@@ -1208,13 +1207,14 @@ describe('10. Workflow-only features', () => {
       };
 
       const workflow = createWorkflow(
+        'riskyOp',
         { riskyOp },
         {
           catchUnexpected: () => 'UNEXPECTED' as const,
         }
       );
 
-      const result = await workflow(async (step, deps) => {
+      const result = await workflow(async ({ step, deps }) => {
         return await step('riskyOp', () => deps.riskyOp());
       });
 

@@ -539,9 +539,9 @@ export async function createPaymentAwaitly(
   raw: unknown,
   actorEmail: string
 ) {
-  const workflow = createWorkflow(paymentDeps);
+  const workflow = createWorkflow('payment', paymentDeps);
 
-  return workflow(async (step, deps) => {
+  return workflow(async ({ step, deps }) => {
     // 1) Validate input
     const input = await step('parse', () => deps.parse(raw), {
       name: 'Parse input',
@@ -650,13 +650,11 @@ Persist workflow state automatically and resume from any point after crashes or 
 
 ```typescript
 import { durable } from 'awaitly/durable';
-import { createMemoryStatePersistence } from 'awaitly/persistence';
 
-const store = createMemoryStatePersistence();
-
+// Omit store to use default in-memory persistence (per process). Pass a SnapshotStore for cross-restart persistence.
 const result = await durable.run(
   { chargeCard, sendReceipt, updateInventory },
-  async (step, deps) => {
+  async ({ step, deps }) => {
     // Each keyed step is automatically checkpointed
     const charge = await step('chargeCard', () => deps.chargeCard(payment), {
       key: 'charge',
@@ -677,7 +675,6 @@ const result = await durable.run(
   },
   {
     id: `checkout-${orderId}`,
-    store,
     version: 1, // Increment when workflow logic changes
   }
 );
@@ -706,29 +703,23 @@ const checkout = createSagaWorkflow({
   scheduleShipping,
 });
 
-const result = await checkout(async (saga, deps) => {
+const result = await checkout(async ({ saga, deps }) => {
   // Step 1: Reserve inventory (with compensation)
   const reservation = await saga.step(
+    'Reserve inventory',
     () => deps.reserveInventory(items),
-    {
-      name: 'Reserve inventory',
-      compensate: (res) => releaseInventory(res.reservationId),
-    }
+    { compensate: (res) => releaseInventory(res.reservationId) }
   );
 
   // Step 2: Charge card (with compensation)
   const payment = await saga.step(
+    'Charge card',
     () => deps.chargeCard(amount),
-    {
-      name: 'Charge card',
-      compensate: (p) => refundPayment(p.transactionId),
-    }
+    { compensate: (p) => refundPayment(p.transactionId) }
   );
 
   // Step 3: Schedule shipping (no compensation needed)
-  await saga.step(() => deps.scheduleShipping(reservation.id), {
-    name: 'Schedule shipping',
-  });
+  await saga.step('Schedule shipping', () => deps.scheduleShipping(reservation.id));
 
   return { reservation, payment };
 });
@@ -777,7 +768,7 @@ const apiBreaker = createCircuitBreaker('external-api', {
 });
 
 // In workflow
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   // executeResult returns a Result, no exceptions
   const data = await paymentBreaker.executeResult(() =>
     step('chargeCard', () => deps.chargeCard(payment))
@@ -830,7 +821,7 @@ const limiter = createCombinedLimiter('api', {
 });
 
 // Usage in workflow
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   // Rate-limited API call
   const data = await apiLimiter.execute(() =>
     step('callApi', () => deps.callExternalApi())
@@ -943,7 +934,7 @@ import {
 const memoryStore = createMemoryStreamStore<string>();
 const fileStore = createFileStreamStore('./output.txt');
 
-await run(async (step) => {
+await run(async ({ step }) => {
   // Get writable and readable streams within workflow
   const writable = await step.getWritable(memoryStore, { key: 'stream-output' });
   const readable = await step.getReadable(memoryStore, { key: 'stream-input' });
@@ -1132,12 +1123,12 @@ const result = await fetchJson<User, MyError>('https://api.example.com/users/1',
 **In Workflows:**
 
 ```typescript
-const workflow = createWorkflow({
+const workflow = createWorkflow('fetchUserPosts', {
   fetchUser: (id: string) => fetchJson<User>(`/api/users/${id}`),
   fetchPosts: (userId: string) => fetchJson<Post[]>(`/api/users/${userId}/posts`),
 });
 
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   const user = await step('getUser', () => deps.fetchUser('1'));
   const posts = await step('getPosts', () => deps.fetchPosts(user.id));
   return { user, posts };
@@ -1158,8 +1149,8 @@ Cancellation-aware delays with human-readable duration strings:
 import { run } from 'awaitly/run';
 import { seconds, minutes, hours, days, ms } from 'awaitly/duration';
 
-await run(async (step) => {
-  // String duration syntax (human-readable) — ID first, then duration
+await run(async ({ step }) => {
+  // String duration syntax (human-readable): ID first, then duration
   await step.sleep('delay', '5s');        // 5 seconds
   await step.sleep('delay', '1m');        // 1 minute
   await step.sleep('delay', '1m 30s');    // 1 minute 30 seconds
@@ -1185,7 +1176,7 @@ const controller = new AbortController();
 // Cancel after 5 seconds
 setTimeout(() => controller.abort(), 5000);
 
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   await step.sleep('delay', '10s', { signal: controller.signal });
   return 'completed';
 }, { signal: controller.signal });
@@ -1198,7 +1189,7 @@ if (!result.ok) {
 **Caching with Key:**
 
 ```typescript
-await run(async (step) => {
+await run(async ({ step }) => {
   // Rate-limit delay that can be resumed
   await step.sleep('delay', '5s', { key: 'rate-limit-delay' });
 
@@ -1264,7 +1255,7 @@ export default [
 | `no-floating-workflow` | Ensures `createWorkflow(...)` is awaited | No |
 | `no-floating-result` | Ensures `Result` values are checked or used | No |
 | `require-result-handling` | Warns when accessing `.value` without `.ok` check | No |
-| `no-options-on-executor` | Prevents `workflow(async (step) => {}, { retry })` | Yes |
+| `no-options-on-executor` | Prevents `workflow(async ({ step }) => {}, { retry })` | Yes |
 | `no-double-wrap-result` | Prevents `ok(ok(value))` or `err(err(e))` | Yes |
 
 **Example Violations:**
@@ -1333,8 +1324,8 @@ const requireManagerApproval = createApprovalStep<{ approvedBy: string }>({
 const result = await orchestrator.execute(
   'high-value-order',
   ({ resumeState, onEvent }) =>
-    createWorkflow(deps, { resumeState, onEvent }),
-  async (step, deps, input) => {
+    createWorkflow('high-value-order', deps, { resumeState, onEvent }),
+  async ({ step, deps, args: input }) => {
     const order = await step('createOrder', () => deps.createOrder(input));
 
     // Pause for approval if order > $10,000
@@ -1620,7 +1611,7 @@ The railway model makes failure a first-class concept. You can see the success p
 
 ### Awaitly: The Conductor Model
 
-Think of yourself as a conductor leading an orchestra. You don't play every instrument—you coordinate musicians (dependencies) through a performance (workflow).
+Think of yourself as a conductor leading an orchestra. You don't play every instrument; you coordinate musicians (dependencies) through a performance (workflow).
 
 - **The Score**: Your workflow function is the sheet music
 - **The Musicians**: Dependencies are injected and called via `step()`
@@ -1635,7 +1626,7 @@ Think of yourself as a conductor leading an orchestra. You don't play every inst
 
 ```typescript
 // The conductor coordinates the performance
-workflow(async (step, deps) => {
+workflow(async ({ step, deps }) => {
   const user = await step('fetchUser', () => deps.fetchUser(id));    // Violin section
   const posts = await step('fetchPosts', () => deps.fetchPosts(id));  // Brass section
   return { user, posts };                                // Final bow
@@ -1656,11 +1647,11 @@ const saga = createSagaWorkflow(deps); // Automatic compensation
 const breaker = createCircuitBreaker('api'); // Fail-fast protection
 const limiter = createRateLimiter('api', { maxPerSecond: 10 }); // Tempo control
 
-await saga(async (saga, deps) => {
+await saga(async ({ saga, deps }) => {
   // Rate-limited, circuit-protected, compensating steps
   const data = await limiter.execute(() =>
     breaker.executeResult(() =>
-      saga.step(() => deps.callApi(), {
+      saga.step('callApi', () => deps.callApi(), {
         compensate: (d) => deps.rollback(d.id),
       })
     )
@@ -1992,11 +1983,11 @@ describe('awaitly payment processing', () => {
 
   it('should track all steps via events', async () => {
     const events: any[] = [];
-    const workflow = createWorkflow(paymentDeps, {
+    const workflow = createWorkflow('payment', paymentDeps, {
       onEvent: (event) => events.push(event),
     });
 
-    await workflow(async (step, deps) => {
+    await workflow(async ({ step, deps }) => {
       // ... workflow logic
     });
 
@@ -2030,7 +2021,7 @@ describe('awaitly payment processing', () => {
     const collector = createResumeStateCollector();
 
     // First run: fail at persist step
-    const workflow1 = createWorkflow(paymentDeps, {
+    const workflow1 = createWorkflow('payment', paymentDeps, {
       onEvent: collector.handleEvent,
     });
 
@@ -2038,7 +2029,7 @@ describe('awaitly payment processing', () => {
     const savedState = collector.getResumeState();
 
     // Second run: resume from saved state
-    const workflow2 = createWorkflow(paymentDeps, {
+    const workflow2 = createWorkflow('payment', paymentDeps, {
       resumeState: savedState,
     });
 
@@ -2103,11 +2094,9 @@ describe('saga compensation', () => {
 
 ```typescript
 import { durable, isWorkflowCancelled } from 'awaitly/durable';
-import { createMemoryStatePersistence } from 'awaitly/persistence';
 
 describe('durable execution', () => {
   it('should resume from last completed step', async () => {
-    const store = createMemoryStatePersistence();
     const callCounts = { step1: 0, step2: 0 };
 
     // First run: complete step1, then "crash"
@@ -2120,29 +2109,29 @@ describe('durable execution', () => {
           return ok({ id: '2' });
         },
       },
-      async (step, deps) => {
+      async ({ step, deps }) => {
         await step('step1', () => deps.step1(), { key: 'step1' });
         await step('step2', () => deps.step2(), { key: 'step2' });
         return 'done';
       },
-      { id: 'test-workflow', store, signal: controller.signal }
+      { id: 'test-workflow', signal: controller.signal }
     );
 
     expect(isWorkflowCancelled(result1.error)).toBe(true);
     expect(callCounts.step1).toBe(1);
 
-    // Resume: step1 should be skipped
+    // Resume: step1 should be skipped (in-memory store shares state for same id)
     const result2 = await durable.run(
       {
         step1: () => { callCounts.step1++; return ok({ id: '1' }); },
         step2: () => { callCounts.step2++; return ok({ id: '2' }); },
       },
-      async (step, deps) => {
+      async ({ step, deps }) => {
         await step('step1', () => deps.step1(), { key: 'step1' });
         await step('step2', () => deps.step2(), { key: 'step2' });
         return 'done';
       },
-      { id: 'test-workflow', store }
+      { id: 'test-workflow' }
     );
 
     expect(result2.ok).toBe(true);
@@ -2212,8 +2201,8 @@ describe('human-in-the-loop', () => {
 
     const result = await orchestrator.execute(
       'test-workflow',
-      ({ resumeState, onEvent }) => createWorkflow(deps, { resumeState, onEvent }),
-      async (step, deps, input) => {
+      ({ resumeState, onEvent }) => createWorkflow('test-workflow', deps, { resumeState, onEvent }),
+      async ({ step, deps, args: input }) => {
         await step('createOrder', () => deps.createOrder(input));
         // This step will pause for approval
         await step('pendingApproval', () => pendingApproval('Needs manager approval'));
@@ -2535,7 +2524,7 @@ const customBreaker = createCircuitBreaker('payment-api', {
   onStateChange: (from, to, name) => console.log(`${name}: ${from} -> ${to}`),
 });
 
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   // executeResult returns a Result, integrates cleanly with workflows
   const data = await breaker.executeResult(() =>
     step('callExternalService', () => deps.callExternalService())
@@ -2584,13 +2573,13 @@ function getDataWithFallback(id: string): ResultAsync<Data, never> {
 }
 
 // Awaitly: Imperative fallbacks with logging
-const getDataWithFallbackAwaitly = createWorkflow({
+const getDataWithFallbackAwaitly = createWorkflow('getDataWithFallback', {
   primaryAPI,
   cache,
   backupAPI,
 });
 
-const result = await getDataWithFallbackAwaitly(async (step, deps) => {
+const result = await getDataWithFallbackAwaitly(async ({ step, deps }) => {
   // Try primary
   const primaryResult = await deps.primaryAPI.getData(id);
   if (primaryResult.ok) return primaryResult.value;
@@ -2676,29 +2665,23 @@ const processOrderSaga = createSagaWorkflow({
   scheduleShipping,
 });
 
-const result = await processOrderSaga(async (saga, deps) => {
+const result = await processOrderSaga(async ({ saga, deps }) => {
   // Step 1: Process payment (with compensation)
   const payment = await saga.step(
+    'Process payment',
     () => deps.processPayment(order.payment),
-    {
-      name: 'Process payment',
-      compensate: (p) => refundPayment(p.id), // Runs on rollback
-    }
+    { compensate: (p) => refundPayment(p.id) } // Runs on rollback
   );
 
   // Step 2: Reserve inventory (with compensation)
   await saga.step(
+    'Reserve inventory',
     () => deps.reserveInventory(order.items),
-    {
-      name: 'Reserve inventory',
-      compensate: () => unreserveInventory(order.items),
-    }
+    { compensate: () => unreserveInventory(order.items) }
   );
 
   // Step 3: Schedule shipping (no compensation needed)
-  await saga.step(() => deps.scheduleShipping(order), {
-    name: 'Schedule shipping',
-  });
+  await saga.step('Schedule shipping', () => deps.scheduleShipping(order));
 
   return { success: true, orderId: order.id };
 });
@@ -2794,7 +2777,7 @@ const limiter = createCombinedLimiter('api', {
 });
 
 // Usage
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   // Rate-limited call
   const data = await apiLimiter.execute(() =>
     step('callApi', () => deps.callApi())
@@ -2811,7 +2794,7 @@ const result = await workflow(async (step, deps) => {
 
 **Why rate limiting matters:**
 
-External APIs have rate limits. Database connections are finite. Without explicit control, you'll hit limits at the worst times—usually during traffic spikes when you need reliability most.
+External APIs have rate limits. Database connections are finite. Without explicit control, you'll hit limits at the worst times, usually during traffic spikes when you need reliability most.
 
 ## Production Battle Stories
 
@@ -2915,7 +2898,7 @@ const orchestrator = createHITLOrchestrator({
 });
 
 const processHighValueOrder = async (order) => {
-  return orchestrator.execute('high-value-order', workflowFactory, async (step, deps, input) => {
+  return orchestrator.execute('high-value-order', workflowFactory, async ({ step, deps, args: input }) => {
     const validated = await step('validateOrder', () => deps.validateOrder(input));
 
     if (validated.total > 100000) {

@@ -4,9 +4,9 @@ Turn Zod validation errors into typed Results for seamless composition in workfl
 
 ## Why Combine Them?
 
-- **Type-safe validation errors** — Know exactly what went wrong, not just "validation failed"
-- **Composable with other operations** — Chain validation with database calls, API requests, etc.
-- **Early exit on invalid input** — `step()` stops the workflow immediately on validation failure
+- **Type-safe validation errors**: Know exactly what went wrong, not just "validation failed"
+- **Composable with other operations**: Chain validation with database calls, API requests, etc.
+- **Early exit on invalid input**: `step()` stops the workflow immediately on validation failure
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ const zodToResult = <T>(
 };
 
 // Use in a workflow
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const user = await step('validateUser', () => zodToResult(UserSchema, { email: 'test@example.com', age: 25 }));
   return user; // User type, not unknown
 }, { onError: () => {} });
@@ -45,7 +45,7 @@ const result = await run(async (step) => {
 
 ### Pattern 1: Basic Schema Validation
 
-The simplest pattern—validate input and return a typed Result:
+The simplest pattern: validate input and return a typed Result:
 
 ```typescript
 import { z } from 'zod';
@@ -91,8 +91,8 @@ import { run } from 'awaitly/run';
 import { zodToResult } from './utils';
 
 const createUser = async (rawInput: unknown) => {
-  return run(async (step) => {
-    // Validate input first — exits early if invalid
+  return run(async ({ step }) => {
+    // Validate input first; exits early if invalid
     const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawInput));
 
     // Now input is typed as CreateUserInput
@@ -172,7 +172,7 @@ const PostIdSchema = z.object({
 
 // API handler
 export const POST = async (request: Request) => {
-  const result = await run(async (step) => {
+  const result = await run(async ({ step }) => {
     const body = await request.json();
 
     // Validate request body
@@ -285,7 +285,7 @@ const createUser = async (data: { email: string; password: string; name: string 
 
 // Registration workflow
 const register = async (rawInput: unknown): AsyncResult<{ id: string; email: string; name: string }, RegisterError> => {
-  return run(async (step) => {
+  return run(async ({ step }) => {
     // Step 1: Validate input
     const input = await step('validateInput', () => zodToResult(RegisterSchema, rawInput));
 
@@ -385,7 +385,7 @@ const handler = async (req: Request) => {
     return Response.json({ error: validation.error.issues }, { status: 400 });
   }
 
-  const result = await run(async (step) => {
+  const result = await run(async ({ step }) => {
     return await step('doSomething', () => doSomething(validation.value));
   }, { onError: () => {} });
 
@@ -461,7 +461,7 @@ export const getFirstError = (error: ValidationError): string => {
 
 ## Tips
 
-1. **Use descriptive error messages in schemas** — They appear in the `issues` array
-2. **Leverage Zod's `path`** — It tells you exactly which field failed
-3. **Combine with `step.try()`** — For schemas with async refinements that might throw
-4. **Create domain-specific schemas** — `EmailSchema`, `UUIDSchema`, etc. for reuse
+1. **Use descriptive error messages in schemas**: They appear in the `issues` array
+2. **Leverage Zod's `path`**: It tells you exactly which field failed
+3. **Combine with `step.try()`**: For schemas with async refinements that might throw
+4. **Create domain-specific schemas**: `EmailSchema`, `UUIDSchema`, etc. for reuse

@@ -1,6 +1,6 @@
 # Using Awaitly With Your Existing Stack
 
-Awaitly isn't a platform you adopt—it's **type-safe glue** for your existing tools.
+Awaitly isn't a platform you adopt; it's **type-safe glue** for your existing tools.
 
 Unlike Effect's "adopt the ecosystem" approach, Awaitly enhances the libraries you already use. Add it to one function, one module, one feature at a time.
 
@@ -34,7 +34,7 @@ const user = await step('validateUser', () => zodToResult(UserSchema, input)); /
 
 ## Quick Pattern: The Integration Wrapper
 
-Every integration follows the same pattern—wrap the library's error handling to return a `Result`:
+Every integration follows the same pattern: wrap the library's error handling to return a `Result`:
 
 ```typescript
 import { ok, err, type Result } from 'awaitly';
@@ -69,7 +69,7 @@ Then use it in workflows:
 ```typescript
 import { run } from 'awaitly/run';
 
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   const validated = await step('validate', () => zodToResult(Schema, input));
   const saved = await step('createUser', () => prismaToResult(() => db.user.create({ data: validated })));
   return saved;
@@ -93,7 +93,7 @@ async function createUser(data: unknown): AsyncResult<User, ValidationError | Db
 
 Mix and match integrations in a single workflow:
 ```typescript
-const result = await run(async (step) => {
+const result = await run(async ({ step }) => {
   // Zod validation
   const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawData));
 
@@ -117,7 +117,7 @@ Add Awaitly to new code while keeping existing code unchanged:
 const oldFeature = await legacyFunction();
 
 // New code: uses Result types
-const newFeature = await run(async (step) => {
+const newFeature = await run(async ({ step }) => {
   return await step('modern', () => modernFunction());
 }, { onError: () => {} });
 ```
@@ -171,7 +171,7 @@ export const fromNullable = <T, E>(
 
 ## Next Steps
 
-1. **Start with Zod** — Most projects have validation. [See the Zod guide →](./zod.md)
-2. **Add Prisma patterns** — If you use Prisma, typed database errors are a game-changer. [See the Prisma guide →](./prisma.md)
-3. **Connect to React Query** — Server state with Result types. [See the React Query guide →](./react-query.md)
-4. **Migrating from neverthrow?** — Gradual path with interop utilities. [See the migration guide →](./neverthrow-migration.md)
+1. **Start with Zod**: Most projects have validation. [See the Zod guide →](./zod.md)
+2. **Add Prisma patterns**: If you use Prisma, typed database errors are a game-changer. [See the Prisma guide →](./prisma.md)
+3. **Connect to React Query**: Server state with Result types. [See the React Query guide →](./react-query.md)
+4. **Migrating from neverthrow?**: Gradual path with interop utilities. [See the migration guide →](./neverthrow-migration.md)

@@ -151,9 +151,9 @@ const validateUserData = flow(
 );
 
 // Use in workflow
-const workflow = createWorkflow({ validateUserData, createUser });
+const workflow = createWorkflow('createUser', { validateUserData, createUser });
 
-const result = await workflow(async (step, deps) => {
+const result = await workflow(async ({ step, deps }) => {
   const validated = await step('validateUserData', () => deps.validateUserData({ email, password }));
   return await step('createUser', () => deps.createUser(validated.email, validated.password));
 });
