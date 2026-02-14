@@ -22,6 +22,7 @@ import {
 // awaitly imports
 // ─────────────────────────────────────────────────────────────────────────────
 import {
+  Awaitly,
   ok,
   err,
   allAsync,
@@ -193,6 +194,66 @@ describe('2. Sequential operations', () => {
     });
   });
 
+  describe('workflow: run() with closures (same as createWorkflow)', () => {
+    const fetchUser = (id: string): AsyncResult<User, 'NOT_FOUND'> =>
+      Promise.resolve(users[id] ? ok(users[id]) : err('NOT_FOUND'));
+
+    const fetchPosts = (userId: string): AsyncResult<Post[], 'FETCH_ERROR'> =>
+      Promise.resolve(posts[userId] ? ok(posts[userId]) : err('FETCH_ERROR'));
+
+    const fetchComments = (
+      postId: string
+    ): AsyncResult<Comment[], 'COMMENTS_ERROR'> =>
+      Promise.resolve(ok([{ id: 'c1', text: 'Great post!', postId }]));
+
+    it('uses run() with step() and closure deps', async () => {
+      type LoadErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<{ user: User; posts: Post[] }, LoadErrors>(
+        async ({ step }) => {
+          const user = await step('getUser', () => fetchUser('1'));
+          const userPosts = await step('getPosts', () => fetchPosts(user.id));
+          return { user, posts: userPosts };
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.user.name).toBe('Alice');
+        expect(result.value.posts).toHaveLength(1);
+      }
+    });
+
+    it('run() stays flat with 3+ operations', async () => {
+      type LoadErrors =
+        | 'NOT_FOUND'
+        | 'FETCH_ERROR'
+        | 'COMMENTS_ERROR'
+        | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<
+        { user: User; posts: Post[]; comments: Comment[] },
+        LoadErrors
+      >(
+        async ({ step }) => {
+          const user = await step('getUser', () => fetchUser('1'));
+          const userPosts = await step('getPosts', () => fetchPosts(user.id));
+          const comments = await step('getComments', () =>
+            fetchComments(userPosts[0].id)
+          );
+          return { user, posts: userPosts, comments };
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.comments).toHaveLength(1);
+      }
+    });
+  });
+
   describe('effect: Effect.gen() with yield*', () => {
     const fetchUser = (id: string): Effect.Effect<User, 'NOT_FOUND'> =>
       users[id] ? Effect.succeed(users[id]) : Effect.fail('NOT_FOUND' as const);
@@ -334,6 +395,71 @@ describe('3. Error type inference', () => {
     });
   });
 
+  describe('workflow: run() infers errors with catchUnexpected', () => {
+    const validateEmail = (email: string): AsyncResult<string, 'INVALID_EMAIL'> =>
+      Promise.resolve(email.includes('@') ? ok(email) : err('INVALID_EMAIL'));
+
+    const validatePassword = (
+      password: string
+    ): AsyncResult<string, 'WEAK_PASSWORD'> =>
+      Promise.resolve(
+        password.length >= 8 ? ok(password) : err('WEAK_PASSWORD')
+      );
+
+    const createUser = (
+      email: string,
+      _password: string
+    ): AsyncResult<User, 'DB_ERROR'> =>
+      Promise.resolve(ok({ id: '1', name: 'New User', email }));
+
+    type SignUpError =
+      | 'INVALID_EMAIL'
+      | 'WEAK_PASSWORD'
+      | 'DB_ERROR'
+      | typeof Awaitly.UNEXPECTED_ERROR;
+
+    it('run() with catchUnexpected gives typed error union', async () => {
+      const result = await run<User, SignUpError>(
+        async ({ step }) => {
+          const email = await step('validateEmail', () =>
+            validateEmail('alice@example.com')
+          );
+          const password = await step('validatePassword', () =>
+            validatePassword('securepass123')
+          );
+          return await step('createUser', () =>
+            createUser(email, password)
+          );
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(result.ok).toBe(true);
+
+      const badResult = await run<User, SignUpError>(
+        async ({ step }) => {
+          const email = await step('validateEmail', () =>
+            validateEmail('not-an-email')
+          );
+          const password = await step('validatePassword', () =>
+            validatePassword('short')
+          );
+          return await step('createUser', () =>
+            createUser(email, password)
+          );
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok) {
+        expect(['INVALID_EMAIL', 'WEAK_PASSWORD', 'DB_ERROR']).toContain(
+          badResult.error.type ?? badResult.error
+        );
+      }
+    });
+  });
+
   describe('effect: typed error classes', () => {
     class InvalidEmail extends Error {
       readonly _tag = 'InvalidEmail';
@@ -461,6 +587,40 @@ describe('4. Wrapping throwing code', () => {
     });
   });
 
+  describe('workflow: run() with step.try()', () => {
+    it('run() wraps throwing code with step.try', async () => {
+      type RunErrors = 'OPERATION_FAILED' | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<string, RunErrors>(
+        async ({ step }) => {
+          return await step.try('riskyOp', () => riskyOperation(false), {
+            error: 'OPERATION_FAILED',
+          });
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value).toBe('success');
+    });
+
+    it('run() step.try catches throws and maps to typed error', async () => {
+      type RunErrors = 'OPERATION_FAILED' | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<string, RunErrors>(
+        async ({ step }) => {
+          return await step.try('riskyOp', () => riskyOperation(true), {
+            error: 'OPERATION_FAILED',
+          });
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('OPERATION_FAILED');
+    });
+  });
+
   describe('effect: Effect.tryPromise()', () => {
     it('wraps promises with error mapping', async () => {
       const result = await Effect.runPromise(
@@ -567,6 +727,41 @@ describe('5. Parallel operations', () => {
 
         return { user, posts, comments };
       });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.user.name).toBe('Alice');
+        expect(result.value.posts).toHaveLength(1);
+        expect(result.value.comments).toHaveLength(1);
+      }
+    });
+  });
+
+  describe('workflow: run() with step.parallel()', () => {
+    it('run() fetches user then runs step.parallel', async () => {
+      type RunErrors =
+        | 'USER_NOT_FOUND'
+        | 'POSTS_ERROR'
+        | 'COMMENTS_ERROR'
+        | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<
+        { user: User; posts: Post[]; comments: Comment[] },
+        RunErrors
+      >(
+        async ({ step }) => {
+          const user = await step('getUser', () => fetchUser('1'));
+          const { posts, comments } = await step.parallel(
+            'Fetch posts and comments',
+            {
+              posts: () => fetchPosts(user.id),
+              comments: () => fetchComments('p1'),
+            }
+          );
+          return { user, posts, comments };
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
 
       expect(result.ok).toBe(true);
       if (result.ok) {
@@ -820,6 +1015,31 @@ describe('7. Error recovery', () => {
     });
   });
 
+  describe('awaitly run(): recovery at boundary', () => {
+    const fetchUser = (id: string): AsyncResult<User, 'NOT_FOUND'> =>
+      Promise.resolve(
+        id === '1'
+          ? ok({ id, name: 'Alice', email: 'alice@example.com' })
+          : err('NOT_FOUND')
+      );
+
+    it('run() with step then recover at boundary', async () => {
+      type RunErrors = 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const result = await run<User, RunErrors>(
+        async ({ step }) => {
+          return await step('getUser', () => fetchUser('999'));
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      const user =
+        result.ok ? result.value : result.error === 'NOT_FOUND' ? defaultUser : null;
+      expect(user).not.toBeNull();
+      expect(user!.name).toBe('Guest');
+    });
+  });
+
   describe('effect: Effect.catchAll() for error recovery', () => {
     const fetchUser = (id: string): Effect.Effect<User, 'NOT_FOUND'> =>
       id === '1'
@@ -1067,6 +1287,39 @@ const R = {
 };
 
 describe('10. Workflow-only features', () => {
+  describe('run() with catchUnexpected - typed errors without DI', () => {
+    const getUser = (id: string): AsyncResult<User, 'NOT_FOUND'> =>
+      Promise.resolve(
+        id === '1'
+          ? ok({ id, name: 'Alice', email: 'alice@example.com' })
+          : err('NOT_FOUND')
+      );
+
+    it('run() returns typed errors when using catchUnexpected', async () => {
+      type RunErrors = 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR;
+
+      const okResult = await run<User, RunErrors>(
+        async ({ step }) => {
+          return await step('getUser', () => getUser('1'));
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(okResult.ok).toBe(true);
+      if (okResult.ok) expect(okResult.value.name).toBe('Alice');
+
+      const errResult = await run<User, RunErrors>(
+        async ({ step }) => {
+          return await step('getUser', () => getUser('999'));
+        },
+        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+      );
+
+      expect(errResult.ok).toBe(false);
+      if (!errResult.ok) expect(errResult.error).toBe('NOT_FOUND');
+    });
+  });
+
   describe('step.retry() - automatic retry with backoff', () => {
     it('retries operations automatically', async () => {
       let attempts = 0;

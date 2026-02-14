@@ -380,7 +380,7 @@ export type CreateUserInput = z.infer<typeof CreateUserSchema>;
 
 // Server
 // src/api/users.ts
-import { ok, err, type AsyncResult } from 'awaitly';
+import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
 import { run } from 'awaitly/run';
 import { CreateUserSchema } from '@/schemas/user';
 
@@ -402,15 +402,7 @@ export const createUser = async (
     ));
 
     return user;
-  }, {
-    onError: (e) => {
-      // Map internal errors to API errors
-      if (e.type === 'UNIQUE_VIOLATION') {
-        return { type: 'EMAIL_TAKEN' as const };
-      }
-      return { type: 'DB_ERROR' as const };
-    },
-  }) as AsyncResult<User, CreateUserError>;
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<User, CreateUserError>;
 };
 
 // Client hook with optimistic updates

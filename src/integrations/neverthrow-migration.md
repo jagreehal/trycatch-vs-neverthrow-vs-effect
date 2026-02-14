@@ -50,11 +50,13 @@ const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND' | 'FETCH_ERR
 };
 
 // Usage: Async/await with step()
+import { Awaitly } from 'awaitly';
+
 const result = await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser('1'));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   return posts.length;
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ## Side-by-Side API Comparison
@@ -143,7 +145,7 @@ const createUser = (data: UserInput): ResultAsync<User, CreateUserError> =>
     );
 
 // After: Awaitly
-import { ok, err, type AsyncResult } from 'awaitly';
+import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
 import { run } from 'awaitly/run';
 
 const validateEmail = (email: string): Result<string, 'INVALID_EMAIL'> =>
@@ -160,7 +162,7 @@ const createUser = async (data: UserInput): AsyncResult<User, 'INVALID_EMAIL' | 
     );
 
     return user;
-  }, { onError: () => {} });
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ### Strategy 3: Module-by-Module Rewrite
@@ -318,14 +320,14 @@ fetchUser(id)
   .mapErr(e => new ApiError(e));
 
 // awaitly
+import { Awaitly } from 'awaitly';
+
 await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser(id));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   const enriched = await step('enrichPosts', () => enrichPosts(posts));
   return enriched.filter(p => p.published);
-}, {
-  onError: (e) => new ApiError(e)
-});
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ### Error Recovery
@@ -363,11 +365,8 @@ await step.parallel('Fetch user data', {
   comments: () => fetchComments(userId),
 });
 
-// Or for dynamic arrays:
-await step.fromResult(
-  () => allAsync(ids.map(id => fetchUser(id))),
-  { onError: (e) => e }
-);
+// Or for dynamic arrays, wrap in step() with allAsync:
+const users = await step('fetchUsers', () => allAsync(ids.map(id => fetchUser(id))));
 ```
 
 ### Wrapping Throwing Code
@@ -379,11 +378,8 @@ ResultAsync.fromPromise(
   (e) => new CustomError(String(e))
 );
 
-// awaitly
-await step.try(
-  () => riskyOperation(),
-  { onError: (e) => new CustomError(String(e)) }
-);
+// awaitly (step ID first, then thunk, then options)
+await step.try('riskyOp', () => riskyOperation(), { error: 'OPERATION_FAILED' });
 ```
 
 ## Tips

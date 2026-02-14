@@ -67,13 +67,14 @@ const libraryToResultAsync = async <T, E>(
 Then use it in workflows:
 
 ```typescript
+import { Awaitly } from 'awaitly';
 import { run } from 'awaitly/run';
 
 const result = await run(async ({ step }) => {
   const validated = await step('validate', () => zodToResult(Schema, input));
   const saved = await step('createUser', () => prismaToResult(() => db.user.create({ data: validated })));
   return saved;
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ## Why This Approach Works
@@ -93,6 +94,9 @@ async function createUser(data: unknown): AsyncResult<User, ValidationError | Db
 
 Mix and match integrations in a single workflow:
 ```typescript
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
+
 const result = await run(async ({ step }) => {
   // Zod validation
   const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawData));
@@ -106,20 +110,23 @@ const result = await run(async ({ step }) => {
   const welcome = await step('fetchWelcome', () => fetchJson(`/api/welcome/${user.id}`));
 
   return { user, welcome };
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 **3. Gradual adoption**
 
 Add Awaitly to new code while keeping existing code unchanged:
 ```typescript
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
+
 // Existing code: still works
 const oldFeature = await legacyFunction();
 
 // New code: uses Result types
 const newFeature = await run(async ({ step }) => {
   return await step('modern', () => modernFunction());
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ## Common Utilities

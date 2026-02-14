@@ -58,7 +58,9 @@ Effect.gen(function* () {
 ```
 
 ### Awaitly (Async/Await)
-Uses standard `async/await` with a `step()` wrapper. The `step` function automatically handles early exits on error.
+Uses standard `async/await` with a `step()` wrapper. The `step` function automatically handles early exits on error. You can use **createWorkflow** (deps injection) or **run()** (closure deps).
+
+**createWorkflow (deps injection):**
 ```typescript
 import { createWorkflow } from 'awaitly/workflow';
 
@@ -69,6 +71,23 @@ const result = await loadUserData(async ({ step, deps }) => {
   const posts = await step('getPosts', () => deps.fetchPosts(user.id));
   return { user, posts };
 });
+```
+
+**run() (closure deps, same behavior):**
+```typescript
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
+
+type LoadErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
+
+const result = await run<{ user: User; posts: Post[] }, LoadErrors>(
+  async ({ step }) => {
+    const user = await step('getUser', () => fetchUser('1'));
+    const posts = await step('getPosts', () => fetchPosts(user.id));
+    return { user, posts };
+  },
+  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+);
 ```
 
 **DX Verdict:**
@@ -105,12 +124,28 @@ Strongly typed. Errors are tracked in the second type parameter `Effect<Success,
 ```
 
 ### awaitly
-**Automatic inference**. When using `createWorkflow`, the library automatically computes the union of all possible errors from the dependencies you use.
+**Automatic inference** with `createWorkflow`, or **typed union** with `run()` and `catchUnexpected`. With `createWorkflow`, the library automatically computes the union of all possible errors from the dependencies.
 ```typescript
 import { createWorkflow } from 'awaitly/workflow';
 
 const myWorkflow = createWorkflow('myWorkflow', { fetchUser, fetchPosts });
-// TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR'
+// TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
+```
+
+With `run()`, use `catchUnexpected` so errors stay typed instead of all becoming `UnexpectedError`:
+```typescript
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
+
+type MyErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
+
+const result = await run<User, MyErrors>(
+  async ({ step }) => {
+    const user = await step('getUser', () => fetchUser('1'));
+    return user;
+  },
+  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+);
 ```
 
 **DX Verdict:** Awaitly's automatic inference reduces boilerplate significantly.
@@ -140,9 +175,10 @@ Effect.tryPromise({
 ```
 
 ### awaitly
-`step.try()`.
+`step.try()` inside a workflow (run or createWorkflow). Converts thrown exceptions to a typed error and exits the workflow.
 ```typescript
-await step.try('apiCall', () => api.call(), { error: 'API_ERROR' });
+// Inside run() or createWorkflow callback:
+return await step.try('apiCall', () => api.call(), { error: 'API_ERROR' });
 ```
 
 ---
@@ -164,26 +200,17 @@ Effect.all([task1, task2], { concurrency: 'unbounded' })
 ```
 
 ### awaitly
-`allAsync()` helper with `step.fromResult()` for error handling, or `step.parallel()` for named operations.
+`allAsync()` for ad-hoc parallel results, or `step.parallel()` inside a workflow for named parallel operations (first argument is the step name).
 ```typescript
-import { allAsync, isPromiseRejectedError } from 'awaitly';
+import { allAsync } from 'awaitly';
 
-// For dynamic arrays, use step.fromResult with error handling
-const results = await step.fromResult(
-  'processItems',
-  () => allAsync(items.map(item => deps.processItem(item))),
-  {
-    onError: (error): ProcessError => {
-      if (isPromiseRejectedError(error)) return 'PROCESS_FAILED';
-      return error;
-    },
-  }
-);
+// Standalone: combine multiple AsyncResults
+const result = await allAsync([fetchUser('1'), fetchPosts('1')]);
 
-// For named parallel operations, use step.parallel
-const { users, posts } = await step.parallel('Fetch data', {
-  users: () => deps.fetchUsers(),
-  posts: () => deps.fetchPosts(),
+// Inside createWorkflow or run(): named parallel steps
+const { user, posts } = await step.parallel('Fetch user and posts', {
+  user: () => deps.fetchUser('1'),
+  posts: () => deps.fetchPosts('1'),
 });
 ```
 
@@ -208,25 +235,26 @@ fetchUser('999').pipe(
 ```
 
 ### awaitly
-Get the raw result, check it, then unwrap with `step()` if needed. Or use `match` helper for pattern matching.
+Recover at the **boundary** after the workflow returns, or use the `match()` helper on a Result. All async work inside the workflow should go through `step()`; avoid calling deps directly for recovery so step tracking stays correct.
 ```typescript
-// Inline recovery inside workflow
-const result = await workflow(async ({ step, deps }) => {
-  const userResult = await deps.fetchUser('999');
-  
-  if (!userResult.ok && userResult.error === 'NOT_FOUND') {
-    return defaultUser;
-  }
-  
-  // Unwrap and continue
-  return await step('getUser', () => userResult);
-});
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
 
-// Or use match() helper
+const result = await run<User, 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR>(
+  async ({ step }) => {
+    return await step('getUser', () => fetchUser('999'));
+  },
+  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+);
+
+// Recover at boundary
+const user = result.ok ? result.value : result.error === 'NOT_FOUND' ? defaultUser : null;
+
+// Or use match() on a single Result (e.g. from a dep)
 import { match } from 'awaitly';
 const user = match(userResult, {
   ok: (value) => value,
-  err: (error) => error === 'NOT_FOUND' ? defaultUser : defaultUser,
+  err: (error) => (error === 'NOT_FOUND' ? defaultUser : defaultUser),
 });
 ```
 

@@ -35,10 +35,12 @@ const zodToResult = <T>(
 };
 
 // Use in a workflow
+import { Awaitly } from 'awaitly';
+
 const result = await run(async ({ step }) => {
   const user = await step('validateUser', () => zodToResult(UserSchema, { email: 'test@example.com', age: 25 }));
   return user; // User type, not unknown
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ## Patterns
@@ -90,6 +92,8 @@ Compose validation with other operations:
 import { run } from 'awaitly/run';
 import { zodToResult } from './utils';
 
+import { Awaitly } from 'awaitly';
+
 const createUser = async (rawInput: unknown) => {
   return run(async ({ step }) => {
     // Validate input first; exits early if invalid
@@ -101,7 +105,7 @@ const createUser = async (rawInput: unknown) => {
     await step('sendWelcomeEmail', () => sendWelcomeEmail(user.email));
 
     return user;
-  }, { onError: () => {} });
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 };
 
 // Error type is automatically: ValidationError | DbError | EmailError
@@ -156,6 +160,7 @@ const handleSubmit = async (formData: FormData) => {
 Validate incoming API requests:
 
 ```typescript
+import { Awaitly } from 'awaitly';
 import { run } from 'awaitly/run';
 import { zodToResult } from './utils';
 
@@ -182,7 +187,7 @@ export const POST = async (request: Request) => {
     const post = await step('createPost', () => createPost(input));
 
     return post;
-  }, { onError: () => {} });
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 
   if (!result.ok) {
     if (result.error.type === 'VALIDATION') {
@@ -238,7 +243,7 @@ Complete, runnable example combining Zod validation with a workflow:
 
 ```typescript
 import { z } from 'zod';
-import { ok, err, type Result, type AsyncResult } from 'awaitly';
+import { Awaitly, ok, err, type Result, type AsyncResult } from 'awaitly';
 import { run } from 'awaitly/run';
 
 // Schemas
@@ -299,7 +304,7 @@ const register = async (rawInput: unknown): AsyncResult<{ id: string; email: str
     const user = await step('createUser', () => createUser(input));
 
     return user;
-  }, { onError: () => {} }) as AsyncResult<{ id: string; email: string; name: string }, RegisterError>;
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<{ id: string; email: string; name: string }, RegisterError>;
 };
 
 // Usage
@@ -378,6 +383,9 @@ const handler = async (req: Request) => {
 };
 
 // After
+import { Awaitly } from 'awaitly';
+import { run } from 'awaitly/run';
+
 const handler = async (req: Request) => {
   const validation = zodToResult(MySchema, await req.json());
 
@@ -387,7 +395,7 @@ const handler = async (req: Request) => {
 
   const result = await run(async ({ step }) => {
     return await step('doSomething', () => doSomething(validation.value));
-  }, { onError: () => {} });
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 
   if (!result.ok) {
     return Response.json({ error: 'Server error' }, { status: 500 });

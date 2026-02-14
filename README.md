@@ -451,7 +451,7 @@ What if you could write code that looks like async/await (familiar to everyone) 
 Welcome to Awaitly, where `step()` unwraps Results and exits early on error, automatically.
 
 ```typescript
-import { ok, err, type AsyncResult } from 'awaitly';
+import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
 import { run } from 'awaitly/run';
 
 const validatePayment = async (data: unknown): AsyncResult<Payment, ValidationError> =>
@@ -469,10 +469,10 @@ const result = await run(async ({ step }) => {
   const charge = await step('chargeCustomer', () => chargeCustomer(payment)); // Only runs if validation succeeded
   await step('saveToDatabase', () => saveToDatabase(charge));                  // Only runs if charge succeeded
   return { success: true };
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 
 // result.ok: true → result.value: { success: true }
-// result.ok: false → result.error: ValidationError | PaymentError | DatabaseError
+// result.ok: false → result.error: ValidationError | PaymentError | DatabaseError | UnexpectedError
 ```
 
 For complex workflows needing caching, resume state, or automatic error inference:
@@ -615,7 +615,7 @@ const result = await run(async ({ step }) => {
   const user = await step('getUser', () => fetchUser('1'));
   const posts = await step('getPosts', () => fetchPosts(user.id));
   return { user, posts };
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 **Early exit is automatic**
@@ -627,11 +627,9 @@ const result = await run(async ({ step }) => {
 For operations that might throw (like wrapping existing APIs), use `step.try()` to convert exceptions to typed errors:
 
 ```typescript
-const response = await step.try(
-  'riskyOp',
-  () => riskyOperation(),
-  { onError: (e) => new CustomError(String(e)) }
-);
+const response = await step.try('riskyOp', () => riskyOperation(), {
+  error: 'OPERATION_FAILED', // or a factory: (cause) => ({ type: 'OPERATION_FAILED', message: String(cause) })
+});
 ```
 
 **Automatic error inference with createWorkflow**

@@ -33,10 +33,12 @@ const findUser = async (id: string): AsyncResult<User, DbError> => {
 };
 
 // Use in a workflow
+import { Awaitly } from 'awaitly';
+
 const result = await run(async ({ step }) => {
   const user = await step('findUser', () => findUser('user-123'));
   return user;
-}, { onError: () => {} });
+}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 ```
 
 ## Patterns
@@ -161,6 +163,7 @@ const userRepository = {
 Combine Prisma with Zod validation:
 
 ```typescript
+import { Awaitly } from 'awaitly';
 import { run } from 'awaitly/run';
 import { zodToResult } from './zod-result';
 import { userRepository } from './user-repository';
@@ -180,7 +183,7 @@ const createUser = async (rawInput: unknown) => {
     const user = await step('createUser', () => userRepository.create(input));
 
     return user;
-  }, { onError: () => {} });
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
 };
 
 // Error type is: ValidationError | EmailTakenError | DbError
@@ -309,7 +312,7 @@ Complete workflow combining Zod validation, email checking, and user creation:
 ```typescript
 import { z } from 'zod';
 import { Prisma, PrismaClient } from '@prisma/client';
-import { ok, err, type AsyncResult } from 'awaitly';
+import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
 import { run } from 'awaitly/run';
 
 const prisma = new PrismaClient();
@@ -373,7 +376,7 @@ const signUp = async (rawInput: unknown): AsyncResult<{ id: string; email: strin
     const user = await step('createUser', () => createUserResult());
 
     return user;
-  }, { onError: () => {} }) as AsyncResult<{ id: string; email: string; name: string }, SignUpError>;
+  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<{ id: string; email: string; name: string }, SignUpError>;
 };
 
 // API handler
