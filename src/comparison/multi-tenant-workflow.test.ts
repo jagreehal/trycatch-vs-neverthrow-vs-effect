@@ -13,8 +13,12 @@
 import { describe, it, expect } from 'vitest';
 import { ResultAsync, okAsync } from 'neverthrow';
 import { Effect } from 'effect';
-import { ok, err, allAsync, tryAsync, type AsyncResult, type UnexpectedError } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
+import {
+  tryAsync,
+  createWorkflow,
+  type AsyncResult,
+  type UnexpectedError,
+} from 'awaitly';
 
 // ============================================================================
 // Shared Types
@@ -181,14 +185,14 @@ export async function multiTenantWorkflow(
     sendBillingNotification,
   });
 
-  return workflow(async ({ step }) => {
+  return workflow.run(async ({ step }) => {
     const tenant = await step('fetchTenant', () => fetchTenant(tenantId), {
       description: 'Fetch tenant',
       key: `tenant:${tenantId}`,
     });
 
     if (tenant.plan !== 'free') {
-      const { users, resources } = await step.parallel('Fetch tenant data', {
+      const { users, resources } = await step.all('Fetch tenant data', {
         users: () => fetchUsers(tenantId),
         resources: () => fetchResources(tenantId),
       });
@@ -492,8 +496,8 @@ describe('Multi-Tenant Workflow', () => {
       const exit = await Effect.runPromiseExit(multiTenantEffect('missing'));
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('TENANT_NOT_FOUND');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('TENANT_NOT_FOUND');
       }
     });
 
@@ -501,8 +505,8 @@ describe('Multi-Tenant Workflow', () => {
       const exit = await Effect.runPromiseExit(multiTenantEffect('limit-exceeded'));
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('RESOURCE_LIMIT_EXCEEDED');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('RESOURCE_LIMIT_EXCEEDED');
       }
     });
   });

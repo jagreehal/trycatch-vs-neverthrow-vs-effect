@@ -380,8 +380,7 @@ export type CreateUserInput = z.infer<typeof CreateUserSchema>;
 
 // Server
 // src/api/users.ts
-import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, run, type AsyncResult } from 'awaitly';
 import { CreateUserSchema } from '@/schemas/user';
 
 type CreateUserError =
@@ -389,21 +388,19 @@ type CreateUserError =
   | { type: 'EMAIL_TAKEN' }
   | { type: 'DB_ERROR' };
 
-export const createUser = async (
-  input: unknown
-): AsyncResult<User, CreateUserError> => {
-  return run(async ({ step }) => {
-    // Validate
-    const data = await step('validateInput', () => zodToResult(CreateUserSchema, input));
-
-    // Create
-    const user = await step('createUser', () => prismaToResult(() =>
-      db.user.create({ data })
-    ));
-
-    return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<User, CreateUserError>;
-};
+export const createUser = (input: unknown) =>
+  run(
+    {
+      validateInput: async () => zodToResult(CreateUserSchema, input),
+      insertUser: async (data: CreateUserInput) =>
+        prismaToResult(() => db.user.create({ data })),
+    },
+    async (s) => {
+      const data = await s.validateInput();
+      return await s.insertUser(data);
+    }
+  );
+// createUser(...) resolves to AsyncResult<User, CreateUserError | UnexpectedError>
 
 // Client hook with optimistic updates
 export const useCreateUser = () => {

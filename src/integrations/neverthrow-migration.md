@@ -1,46 +1,41 @@
 # Migrating from neverthrow to Awaitly
 
-A gradual migration guide for teams already using neverthrow who want to adopt Awaitly's workflows, automatic error inference, and additional features.
+A gradual migration guide for teams using neverthrow. Awaitly matches neverthrow at the Result layer (`ok`/`err`, `AsyncResult`). Composition via `run(deps, fn)` and workflows are optional add-ons.
 
 ## Why Migrate?
 
-**Keep what you love about neverthrow:**
-- Type-safe Result types
+**Result layer: same model as neverthrow**
+- Type-safe Result types (`ok`, `err`, `Result`, `AsyncResult`)
 - Explicit error handling
-- Railway-oriented programming
+- Sync data-first combinators (`andThen`, `map`, `allAsync`) as an alternative to method chaining
 
-**Add what Awaitly provides:**
-- **Automatic error type inference**: No more manual union types
-- **Async/await syntax**: Familiar imperative style with `step()`
-- **Built-in workflows**: Caching, resume state, HITL
-- **Policies and resilience**: Retries, timeouts, circuit breakers
-- **Streaming**: Result-aware stream processing
-- **Functional utilities**: `pipe`, `flow`, `R.*` helpers
+**Composition and workflows: optional extras**
+- `tryAsync` for HTTP and other throwing boundaries
+- Manual checks + `ErrorsOf`, or `run(deps, fn)` for multi-step async flows
+- `createWorkflow()` for step caching, resume, and production orchestration
+- Policies, circuit breakers, sagas, streaming
 
-## Quick Comparison
+## Drop-in replacement (no workflows)
 
 ```typescript
 // neverthrow
 import { ok, err, ResultAsync } from 'neverthrow';
 
 const fetchUser = (id: string): ResultAsync<User, 'NOT_FOUND' | 'FETCH_ERROR'> =>
-  ResultAsync.fromPromise(
-    api.getUser(id),
-    () => 'FETCH_ERROR'
-  ).andThen(user =>
-    user ? ok(user) : err('NOT_FOUND')
+  ResultAsync.fromPromise(api.getUser(id), () => 'FETCH_ERROR').andThen((user) =>
+    user ? ok(user) : err('NOT_FOUND'),
   );
 
-// Usage: Method chaining
 const result = await fetchUser('1')
-  .andThen(user => fetchPosts(user.id))
-  .map(posts => posts.length);
+  .andThen((user) => fetchPosts(user.id))
+  .map((posts) => posts.length);
 
-// awaitly
-import { ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+// awaitly Level 1: same functions, plain async Results
+import { ok, err, andThen, map, type AsyncResult } from 'awaitly';
 
-const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND' | 'FETCH_ERROR'> => {
+const fetchUserAwaitly = async (
+  id: string,
+): AsyncResult<User, 'NOT_FOUND' | 'FETCH_ERROR'> => {
   try {
     const user = await api.getUser(id);
     return user ? ok(user) : err('NOT_FOUND');
@@ -49,14 +44,59 @@ const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND' | 'FETCH_ERR
   }
 };
 
-// Usage: Async/await with step()
-import { Awaitly } from 'awaitly';
+const userResult = await fetchUserAwaitly('1');
+const postsResult = userResult.ok
+  ? await fetchPosts(userResult.value.id)
+  : userResult;
+const resultAwaitly = map(postsResult, (posts) => posts.length);
+```
 
-const result = await run(async ({ step }) => {
-  const user = await step('getUser', () => fetchUser('1'));
-  const posts = await step('getPosts', () => fetchPosts(user.id));
+No `run()`, no `step()`, no `createWorkflow()`. Swap imports and keep your error types.
+
+## When to add run()
+
+Use `run(deps, fn)` when a multi-step flow gets repetitive `if (!result.ok) return result` checks:
+
+```typescript
+import { run } from 'awaitly';
+
+const result = await run({ fetchUserAwaitly, fetchPosts }, async (s) => {
+  const user = await s.fetchUserAwaitly('1');
+  const posts = await s.fetchPosts(user.id);
   return posts.length;
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+});
+```
+
+## Quick Comparison (manual vs run)
+
+```typescript
+// neverthrow: method chaining throughout
+const result = await fetchUser('1')
+  .andThen((user) => fetchPosts(user.id))
+  .map((posts) => posts.length);
+
+// awaitly non-run: manual checks + ErrorsOf
+import { ok, type AsyncResult, type ErrorsOf } from 'awaitly';
+
+const deps = { fetchUserAwaitly, fetchPosts };
+type LoadErrors = ErrorsOf<typeof deps>;
+
+const level1 = async (): AsyncResult<number, LoadErrors> => {
+  const userResult = await deps.fetchUserAwaitly('1');
+  if (!userResult.ok) return userResult;
+  const postsResult = await deps.fetchPosts(userResult.value.id);
+  if (!postsResult.ok) return postsResult;
+  return ok(postsResult.value.length);
+};
+
+// awaitly run(deps, fn): early exit without if-checks
+import { run } from 'awaitly';
+
+const level2 = await run({ fetchUserAwaitly, fetchPosts }, async (s) => {
+  const user = await s.fetchUserAwaitly('1');
+  const posts = await s.fetchPosts(user.id);
+  return posts.length;
+});
 ```
 
 ## Side-by-Side API Comparison
@@ -69,13 +109,15 @@ const result = await run(async ({ step }) => {
 | `ResultAsync<T, E>` | `AsyncResult<T, E>` | Type alias for `Promise<Result<T, E>>` |
 | `.isOk()` / `.isErr()` | `result.ok` | Boolean property |
 | `.value` / `.error` | `result.value` / `result.error` | Direct access when `ok` is checked |
-| `.andThen(fn)` | `await step('id', () => fn(value))` | In workflows |
-| `.map(fn)` | `R.map(fn)` | Via functional utilities |
-| `.mapErr(fn)` | `R.mapError(fn)` | Via functional utilities |
+| `.andThen(fn)` | Manual checks, sync `andThen`, or `run(deps, fn)` | Sync combinators only; async via manual / `run` |
+| `.map(fn)` | `map(result, fn)` | Data-first combinator (sync Result) |
+| `.mapErr(fn)` | `mapError(result, fn)` | Data-first combinator |
 | `.orElse(fn)` | Manual check or `match()` | More explicit |
 | `ResultAsync.combine([])` | `allAsync([])` | Parallel execution |
-| `ResultAsync.fromPromise()` | `step.try()` | Wrap throwing code |
-| N/A | `createWorkflow()` | Auto error inference |
+| `ResultAsync.fromPromise()` | `tryAsync()` or `step.try()` | `tryAsync` at Result layer; `step.try()` in workflows |
+| N/A | `ErrorsOf<typeof deps>` | Derive error unions from a deps object |
+| N/A | `run(deps, fn)` | Composition without workflows |
+| N/A | `createWorkflow()` | Caching, resume, auto error inference |
 | N/A | `step.retry()` | Built-in retries |
 | N/A | `createSagaWorkflow()` | Compensation/rollback |
 
@@ -95,7 +137,7 @@ export const getUser = (id: string): ResultAsync<User, 'NOT_FOUND'> =>
 
 // New code: Use Awaitly
 // src/features/checkout/workflow.ts
-import { createWorkflow } from 'awaitly/workflow';
+import { createWorkflow } from 'awaitly';
 import { getUser } from '@/legacy/user-service'; // Import neverthrow function
 
 // Interop helper
@@ -112,7 +154,7 @@ const checkoutWorkflow = createWorkflow('checkout', {
   processPayment,
 });
 
-const result = await checkoutWorkflow(async ({ step, deps }) => {
+const result = await checkoutWorkflow.run(async ({ step, deps }) => {
   // Use legacy neverthrow function via interop
   const user = await step('getUser', () => fromNeverthrow(getUser(userId)));
 
@@ -145,24 +187,25 @@ const createUser = (data: UserInput): ResultAsync<User, CreateUserError> =>
     );
 
 // After: Awaitly
-import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, run, type AsyncResult } from 'awaitly';
 
 const validateEmail = (email: string): Result<string, 'INVALID_EMAIL'> =>
   email.includes('@') ? ok(email) : err('INVALID_EMAIL');
 
-const createUser = async (data: UserInput): AsyncResult<User, 'INVALID_EMAIL' | 'DB_ERROR'> =>
-  run(async ({ step }) => {
+const createUser = (data: UserInput) =>
+  run<User, 'INVALID_EMAIL' | 'DB_ERROR'>(async ({ step }) => {
     const email = await step('validateEmail', () => validateEmail(data.email));
 
     const user = await step.try(
       'createUser',
       () => db.createUser({ ...data, email }),
-      { error: 'DB_ERROR' as const }
+      { error: 'DB_ERROR' }
     );
 
     return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+  });
+// createUser(...) resolves to
+//   AsyncResult<User, 'INVALID_EMAIL' | 'DB_ERROR' | UnexpectedError>
 ```
 
 ### Strategy 3: Module-by-Module Rewrite
@@ -183,8 +226,7 @@ export const processPayment = (data: unknown): ResultAsync<Transaction, ProcessP
     .andThen(recordTransaction);
 
 // After: src/services/payment.ts (Awaitly)
-import { ok, err, type AsyncResult } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
+import { ok, err, createWorkflow, type AsyncResult } from 'awaitly';
 
 export const validatePayment = (data: unknown): Result<PaymentInput, ValidationError> => { ... };
 export const chargeCard = async (input: PaymentInput): AsyncResult<ChargeResult, ChargeError> => { ... };
@@ -198,7 +240,7 @@ export const processPayment = createWorkflow('processPayment', {
 });
 
 // Usage
-const result = await processPayment(async ({ step, deps }) => {
+const result = await processPayment.run(async ({ step, deps }) => {
   const input = await step('validatePayment', () => deps.validatePayment(data));
   const charge = await step('chargeCard', () => deps.chargeCard(input));
   const transaction = await step('recordTransaction', () => deps.recordTransaction(charge));
@@ -320,14 +362,12 @@ fetchUser(id)
   .mapErr(e => new ApiError(e));
 
 // awaitly
-import { Awaitly } from 'awaitly';
-
-await run(async ({ step }) => {
-  const user = await step('getUser', () => fetchUser(id));
-  const posts = await step('getPosts', () => fetchPosts(user.id));
-  const enriched = await step('enrichPosts', () => enrichPosts(posts));
+await run({ fetchUser, fetchPosts, enrichPosts }, async (s) => {
+  const user = await s.fetchUser(id);
+  const posts = await s.fetchPosts(user.id);
+  const enriched = await s.enrichPosts(posts);
   return enriched.filter(p => p.published);
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+});
 ```
 
 ### Error Recovery
@@ -359,7 +399,7 @@ ResultAsync.combine([
 ]);
 
 // awaitly (name first, then operations object)
-await step.parallel('Fetch user data', {
+await step.all('Fetch user data', {
   user: () => fetchUser(userId),
   posts: () => fetchPosts(userId),
   comments: () => fetchComments(userId),

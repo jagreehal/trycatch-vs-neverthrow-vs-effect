@@ -25,7 +25,8 @@ const failure = Effect.fail('NOT_FOUND');
 ```
 
 ### awaitly
-Similar to Neverthrow, but returns simple objects `{ ok: true, value: ... }` or `{ ok: false, error: ... }`.
+Same shape as Neverthrow: `{ ok: true, value: ... }` or `{ ok: false, error: ... }`. This is the minimum Awaitly surface. You can stop here.
+
 ```typescript
 import { ok, err } from 'awaitly';
 const success = ok({ id: '1' });
@@ -57,43 +58,65 @@ Effect.gen(function* () {
 });
 ```
 
-### Awaitly (Async/Await)
-Uses standard `async/await` with a `step()` wrapper. The `step` function automatically handles early exits on error. You can use **createWorkflow** (deps injection) or **run()** (closure deps).
+### Awaitly (manual checks, no workflow)
+Await each `AsyncResult`, early-return on error. Type the union with `ErrorsOf`. No `run()` or `createWorkflow()` required.
 
-**createWorkflow (deps injection):**
 ```typescript
-import { createWorkflow } from 'awaitly/workflow';
+import { ok, type AsyncResult, type ErrorsOf } from 'awaitly';
+
+const fetchUser = (id: string): AsyncResult<User, 'NOT_FOUND'> => /* ... */;
+const fetchPosts = (userId: string): AsyncResult<Post[], 'FETCH_ERROR'> => /* ... */;
+
+const deps = { fetchUser, fetchPosts };
+type LoadErrors = ErrorsOf<typeof deps>;
+
+const loadUserData = async (
+  id: string,
+): AsyncResult<{ user: User; posts: Post[] }, LoadErrors> => {
+  const userResult = await deps.fetchUser(id);
+  if (!userResult.ok) return userResult;
+
+  const postsResult = await deps.fetchPosts(userResult.value.id);
+  if (!postsResult.ok) return postsResult;
+
+  return ok({ user: userResult.value, posts: postsResult.value });
+};
+```
+
+Sync `andThen` / `map` only work on sync `Result` values (callback must return `Result`, not `AsyncResult`).
+
+### Awaitly (`run(deps, fn)` — still not a workflow)
+Deps-first `run` unwraps successes and exits early on error. Error union is inferred from the deps object.
+
+```typescript
+import { run } from 'awaitly';
+
+const result = await run({ fetchUser, fetchPosts }, async (s) => {
+  const user = await s.fetchUser('1');
+  const posts = await s.fetchPosts(user.id);
+  return { user, posts };
+});
+```
+
+### Awaitly (`createWorkflow` — optional production tier)
+Add `createWorkflow()` when you need caching, resume, or named production workflows.
+
+```typescript
+import { createWorkflow } from 'awaitly';
 
 const loadUserData = createWorkflow('loadUserData', { fetchUser, fetchPosts });
 
-const result = await loadUserData(async ({ step, deps }) => {
+const result = await loadUserData.run(async ({ step, deps }) => {
   const user = await step('getUser', () => deps.fetchUser('1'));
   const posts = await step('getPosts', () => deps.fetchPosts(user.id));
   return { user, posts };
 });
 ```
 
-**run() (closure deps, same behavior):**
-```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
-
-type LoadErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
-
-const result = await run<{ user: User; posts: Post[] }, LoadErrors>(
-  async ({ step }) => {
-    const user = await step('getUser', () => fetchUser('1'));
-    const posts = await step('getPosts', () => fetchPosts(user.id));
-    return { user, posts };
-  },
-  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
-);
-```
-
 **DX Verdict:**
 - **Neverthrow:** Clean for 1-2 steps. Harder for 3+.
-- **Effect:** Excellent, flat syntax. Requires understanding generators.
-- **Awaitly:** Most familiar for JS/TS devs (just async/await).
+- **Effect:** Flat syntax with generators. Requires learning Effect.
+- **Awaitly:** Start with manual checks + `ErrorsOf`. Add `run(deps, fn)` when if-boilerplate hurts; `createWorkflow()` when you need caching/resume.
 
 ---
 
@@ -124,31 +147,27 @@ Strongly typed. Errors are tracked in the second type parameter `Effect<Success,
 ```
 
 ### awaitly
-**Automatic inference** with `createWorkflow`, or **typed union** with `run()` and `catchUnexpected`. With `createWorkflow`, the library automatically computes the union of all possible errors from the dependencies.
+**Automatic inference** with deps-first `run({ ... }, fn)` or `createWorkflow`. Derive named unions with `ErrorsOf<typeof deps>` for the manual path.
 ```typescript
-import { createWorkflow } from 'awaitly/workflow';
+import { createWorkflow, run, type ErrorsOf } from 'awaitly';
 
-const myWorkflow = createWorkflow('myWorkflow', { fetchUser, fetchPosts });
-// TypeScript automatically knows the error is: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
+const deps = { fetchUser, fetchPosts };
+type MyErrors = ErrorsOf<typeof deps>;
+// 'NOT_FOUND' | 'FETCH_ERROR'
+
+// Deps-first run: error union inferred (plus UnexpectedError)
+const result = await run(deps, async (s) => {
+  const user = await s.fetchUser('1');
+  return user;
+});
+
+const myWorkflow = createWorkflow('myWorkflow', deps);
+// TypeScript knows: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
 ```
 
-With `run()`, use `catchUnexpected` so errors stay typed instead of all becoming `UnexpectedError`:
-```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+**What Awaitly 4 changed:** the inferred union is now *displayed* as its concrete literals. Through v3, hovering `result.error` on an inferred workflow showed an opaque alias — `ErrorsOf<{ …the whole deps object… }>` — because a named alias over a generic never expands in TypeScript's display. The type was always right; you just could not read it, so a typo like `result.error === 'NOT_FUOND'` looked plausible in the editor. Now the same hover reads `'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError`, and the typo is an obvious compile error. This puts awaitly level with Effect's explicit error channel without asking you to write the union down.
 
-type MyErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
-
-const result = await run<User, MyErrors>(
-  async ({ step }) => {
-    const user = await step('getUser', () => fetchUser('1'));
-    return user;
-  },
-  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
-);
-```
-
-**DX Verdict:** Awaitly's automatic inference reduces boilerplate significantly.
+**DX Verdict:** Awaitly's automatic inference reduces boilerplate significantly, and in v4 you can see what it inferred.
 
 ---
 
@@ -200,7 +219,7 @@ Effect.all([task1, task2], { concurrency: 'unbounded' })
 ```
 
 ### awaitly
-`allAsync()` for ad-hoc parallel results, or `step.parallel()` inside a workflow for named parallel operations (first argument is the step name).
+`allAsync()` for ad-hoc parallel results, or `step.all()` inside a workflow for named parallel operations (first argument is the step name).
 ```typescript
 import { allAsync } from 'awaitly';
 
@@ -208,7 +227,7 @@ import { allAsync } from 'awaitly';
 const result = await allAsync([fetchUser('1'), fetchPosts('1')]);
 
 // Inside createWorkflow or run(): named parallel steps
-const { user, posts } = await step.parallel('Fetch user and posts', {
+const { user, posts } = await step.all('Fetch user and posts', {
   user: () => deps.fetchUser('1'),
   posts: () => deps.fetchPosts('1'),
 });
@@ -227,32 +246,29 @@ fetchUser('999').orElse(() => ok(defaultUser))
 ```
 
 ### Effect
-`Effect.catchAll()`.
+`Effect.catch()`.
 ```typescript
 fetchUser('999').pipe(
-  Effect.catchAll(() => Effect.succeed(defaultUser))
+  Effect.catch(() => Effect.succeed(defaultUser))
 )
 ```
 
 ### awaitly
-Recover at the **boundary** after the workflow returns, or use the `match()` helper on a Result. All async work inside the workflow should go through `step()`; avoid calling deps directly for recovery so step tracking stays correct.
+Recover at the **boundary** after composition returns, or use the `match()` helper on a Result.
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run, match } from 'awaitly';
 
-const result = await run<User, 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR>(
-  async ({ step }) => {
-    return await step('getUser', () => fetchUser('999'));
-  },
-  { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
-);
+const result = await run({ fetchUser }, async (s) => s.fetchUser('999'));
 
 // Recover at boundary
-const user = result.ok ? result.value : result.error === 'NOT_FOUND' ? defaultUser : null;
+const user = result.ok
+  ? result.value
+  : result.error === 'NOT_FOUND'
+    ? defaultUser
+    : null;
 
 // Or use match() on a single Result (e.g. from a dep)
-import { match } from 'awaitly';
-const user = match(userResult, {
+const recovered = match(userResult, {
   ok: (value) => value,
   err: (error) => (error === 'NOT_FOUND' ? defaultUser : defaultUser),
 });
@@ -273,7 +289,7 @@ Manual implementation or community libraries.
 ### awaitly
 Built-in `createCircuitBreaker` with presets.
 ```typescript
-import { createCircuitBreaker, circuitBreakerPresets } from 'awaitly/circuit-breaker';
+import { createCircuitBreaker, circuitBreakerPresets } from 'awaitly';
 
 const breaker = createCircuitBreaker('api', circuitBreakerPresets.standard);
 
@@ -297,7 +313,7 @@ Manual implementation required.
 ### awaitly
 Built-in `createRateLimiter` and `createConcurrencyLimiter`.
 ```typescript
-import { createRateLimiter, createConcurrencyLimiter } from 'awaitly/ratelimit';
+import { createRateLimiter, createConcurrencyLimiter } from 'awaitly';
 
 const limiter = createRateLimiter('api', { maxPerSecond: 10 });
 const poolLimiter = createConcurrencyLimiter('db', { maxConcurrent: 5 });
@@ -320,18 +336,24 @@ Manual via effect handlers.
 ### awaitly
 Built-in `createSagaWorkflow` with automatic LIFO compensation.
 ```typescript
-import { createSagaWorkflow } from 'awaitly/saga';
+import { createSagaWorkflow } from 'awaitly/durable';
 
-const saga = createSagaWorkflow({ reserve, charge, ship });
+const checkout = createSagaWorkflow('checkout', {
+  reserve,
+  release,
+  charge,
+  refund,
+  ship,
+});
 
-await saga(async (ctx, deps) => {
-  await ctx.step(() => deps.reserve(items), {
-    compensate: (r) => release(r.id)
+await checkout.run(async ({ step, deps }) => {
+  await step('reserve', () => deps.reserve(items), {
+    compensate: (r) => deps.release(r.id),
   });
-  await ctx.step(() => deps.charge(amount), {
-    compensate: (p) => refund(p.id)
+  await step('charge', () => deps.charge(amount), {
+    compensate: (p) => deps.refund(p.id),
   });
-  await ctx.step(() => deps.ship(orderId)); // If this fails, compensations run
+  await step('ship', () => deps.ship(orderId)); // If this fails, compensations run
 });
 ```
 
@@ -350,7 +372,7 @@ Via `Schedule` composition.
 ### awaitly
 Built-in policy system with presets.
 ```typescript
-import { servicePolicies, withPolicy } from 'awaitly/policies';
+import { servicePolicies, withPolicy } from 'awaitly';
 
 const user = await step(
   'fetchUser',
@@ -384,16 +406,29 @@ const processed = Stream.fromIterable(data).pipe(
 ```
 
 ### Awaitly
-`awaitly/streaming` provides Result-aware stream transformers:
+`awaitly/durable` provides Result-aware stream transformers. They are data-first functions over async iterables — the source comes first — composed with `pipe`:
 ```typescript
-import { map, filter, collect } from 'awaitly/streaming';
+import { pipe, map, filter, collect } from 'awaitly/durable';
 
-const processed = readable
-  .pipeThrough(map((item) => ok(item.toUpperCase())))
-  .pipeThrough(filter((item) => item.length > 0));
+const processed = pipe(
+  reader, // step.getReadable<string>({ namespace: 'input' })
+  (s) => map(s, (item) => item.toUpperCase()),
+  (s) => filter(s, (item) => item.length > 0)
+);
 
-const results = await step('collect', () => collect(processed));
+// collect() returns a plain promise — a caller who just wants an array gets one
+const results = await collect(processed);
 ```
+
+A stream failure is not lost by that choice. Since Awaitly 4.1 a failing read arrives as a typed value at the workflow boundary, the same way `STEP_TIMEOUT` does, instead of being wrapped in `UnexpectedError`:
+
+```typescript
+if (!result.ok && (result.error.type ?? result.error) === 'STREAM_READ_ERROR') {
+  return { status: 503 }; // the store is down — retry
+}
+```
+
+Only a throw from your *own* transform callback stays an `UnexpectedError`. Effect models this in the error channel of the stream itself; awaitly keeps it in the same `result.error` union you already match on.
 
 ---
 
@@ -424,18 +459,17 @@ pipe(
 ```
 
 ### Awaitly
-`awaitly/functional` provides similar utilities:
+Awaitly 4 exports data-first Result combinators from the root (sync `Result` only):
 ```typescript
-import { pipe, R } from 'awaitly/functional';
+import { andThen, map, mapError } from 'awaitly';
 
-pipe(
-  data,
-  validateUser,
-  R.map((user) => enrichUser(user)),
-  R.andThen((user) => saveUser(user)),
-  R.mapError((e) => new ApiError(e))
-);
+const validated = validateUser(data); // Result, not AsyncResult
+const enriched = map(validated, enrichUser);
+const saved = andThen(enriched, saveUser); // saveUser returns Result
+const result = mapError(saved, (error) => new ApiError(error));
 ```
+
+For async sequential work, use manual checks + `ErrorsOf`, or `run(deps, fn)`.
 
 ---
 
@@ -456,7 +490,7 @@ const fetchUser = (id: string) =>
 ### Effect
 Uses `HttpClient` service:
 ```typescript
-import { HttpClient, HttpClientResponse } from '@effect/platform';
+import { HttpClient, HttpClientResponse } from 'effect/unstable/http';
 
 const fetchUser = (id: string) =>
   HttpClient.get(`/api/users/${id}`).pipe(
@@ -466,12 +500,18 @@ const fetchUser = (id: string) =>
 ```
 
 ### Awaitly
-`awaitly/fetch` provides built-in helpers with error types:
+Awaitly 4 wraps the platform boundary with `tryAsync` and application-defined errors:
 ```typescript
-import { fetchJson } from 'awaitly/fetch';
+import { tryAsync } from 'awaitly';
 
-const result = await fetchJson<User>(`/api/users/${id}`);
-// Error type: NOT_FOUND | BAD_REQUEST | UNAUTHORIZED | FORBIDDEN | SERVER_ERROR | NETWORK_ERROR
+const result = await tryAsync(
+  async () => {
+    const response = await fetch(`/api/users/${id}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json() as Promise<User>;
+  },
+  () => 'FETCH_ERROR' as const,
+);
 ```
 
 ---
@@ -480,22 +520,22 @@ const result = await fetchJson<User>(`/api/users/${id}`);
 
 | Feature | Neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
-| **Paradigm** | Functional (Chaining) | Functional (Blueprint) | Imperative (Async/Await) |
-| **Syntax** | `.andThen().map()` | `yield* Effect...` | `await step(...)` |
+| **Paradigm** | Functional (Chaining) | Functional (Blueprint) | Results first; workflows optional |
+| **Syntax** | `.andThen().map()` | `yield* Effect...` | Manual / `run(deps, fn)` / `await step(...)` |
 | **Learning Curve** | Low | High | Low |
-| **Inference** | Good | Excellent | Excellent (Auto-unions) |
-| **Circuit Breaker** | Manual | Manual | Built-in |
-| **Rate Limiting** | Manual | Manual | Built-in |
-| **Saga Pattern** | Manual | Manual | Built-in |
-| **Policies** | Manual | Via Schedule | Built-in |
-| **Durable Execution** | Manual | Manual | Built-in |
-| **Streaming** | Manual | Stream module | Built-in |
-| **Functional Utils** | Method chaining | pipe/flow | pipe/flow/R |
-| **Fetch Helpers** | Manual | HttpClient | fetchJson/fetchText |
+| **Inference** | Good | Excellent | Excellent (`ErrorsOf`, `run(deps)`, `createWorkflow`) |
+| **Circuit Breaker** | Manual | Manual | Built-in (optional) |
+| **Rate Limiting** | Manual | Manual | Built-in (optional) |
+| **Saga Pattern** | Manual | Manual | Built-in (optional) |
+| **Policies** | Manual | Via Schedule | Built-in (optional) |
+| **Durable Execution** | Manual | Manual | Built-in (optional) |
+| **Streaming** | Manual | Stream module | Built-in (optional) |
+| **Functional Utils** | Method chaining | pipe/flow | Sync `andThen`/`map`; async via `run` |
+| **Fetch Helpers** | Manual | HttpClient | `tryAsync` + native `fetch` |
 | **ESLint Plugin** | ✓ | ✓ | ✓ |
 | **Ecosystem** | Minimal | Massive | Focused |
 
 **Choose based on:**
-- **Neverthrow:** If you love functional chains and want a lightweight library for simple error handling.
-- **Effect:** If you need structured concurrency with fibers, sophisticated DI with layers, powerful streams, and are willing to learn.
-- **Awaitly:** If you want production-grade reliability (circuit breakers, rate limiting, sagas, durability, streaming, functional utils) with familiar async/await syntax.
+- **Neverthrow:** Functional chains and a lightweight library for simple error handling.
+- **Effect:** Structured concurrency, DI with layers, powerful streams, and you can invest in learning FP.
+- **Awaitly:** Start with Results (`ok`/`err`) and manual checks + `ErrorsOf`. Add `run(deps, fn)` for composition; `createWorkflow()` when you need caching, resume, or policies.

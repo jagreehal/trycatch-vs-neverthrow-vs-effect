@@ -8,38 +8,36 @@ See the code: `ecommerce-checkout.test.ts`
 ## The Approaches
 
 ### 1. The Awaitly Approach
+
+*This scenario uses `createWorkflow` because checkout needs parallel steps and automatic error inference. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+
 *Automatic Error Unions & Flat Flow.*
 
 The main advantage here is **Automatic Error Inference**. The checkout process can fail in 5 different ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`). Awaitly automatically infers this union type for you.
 
 ```typescript
 // Type inference works automatically
-import { createWorkflow } from 'awaitly/workflow';
-import { allAsync, isPromiseRejectedError } from 'awaitly';
+import { createWorkflow, allAsync } from 'awaitly';
 
 const workflow = createWorkflow('checkout', { validateCart, checkInventory, getPricing, ... });
 
-return workflow(async ({ step, deps }) => {
-  // Parallel execution with error handling
-  const inventoryChecks = await step.fromResult(
+return workflow.run(async ({ step, deps }) => {
+  // Parallel execution — the error type is exactly InventoryError
+  const inventoryChecks = await step(
+    'checkInventory',
     () => allAsync(
       validatedCart.items.map(item =>
         deps.checkInventory(item.productId, item.quantity)
       )
     ),
-    {
-      onError: (error): InventoryError => {
-        if (isPromiseRejectedError(error)) {
-          return 'OUT_OF_STOCK';
-        }
-        return error;
-      },
-      name: 'Check inventory',
-      key: `inventory:${cart.userId}`
-    }
+    { key: `inventory:${cart.userId}` }
   );
 });
 ```
+
+**Awaitly 4 removed a failure mode here.** In Awaitly 3, `allAsync` caught promise rejections and reported `PromiseRejectedError`, so every caller had to widen its union and remap that case back into the domain (`isPromiseRejectedError(error) ? 'OUT_OF_STOCK' : error`) — a `step.fromResult` with an `onError` mapper just to launder an error nobody modelled. A rejection is a thrown exception, and `UnexpectedError` already covers those, so `allAsync` and `anyAsync` no longer report it. The parallel inventory check is now a plain `step()` whose error type is exactly the union the deps declare.
+
+Two related tightenings: `any` / `anyAsync` now require a non-empty array (an empty one is a compile error, and `EmptyInputError` is gone from the return type), and when every racer in `anyAsync` fails, a modelled error always wins over a thrown one instead of whichever settled first. `allSettledAsync` is unchanged — reporting every outcome, `PromiseRejectedError` included, is what it is for.
 
 **Pros:**
 - **Type Safety without Boilerplate:** You don't need to manually type `Result<Order, Error1 | Error2 | Error3 ...>`.
@@ -52,26 +50,32 @@ return workflow(async ({ step, deps }) => {
 When checkout steps need rollback on failure:
 
 ```typescript
-import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/durable';
 
-const checkout = createSagaWorkflow({ reserveInventory, chargeCard, scheduleShipping });
+const checkout = createSagaWorkflow('checkout', {
+  reserveInventory,
+  releaseInventory,
+  chargeCard,
+  refundPayment,
+  scheduleShipping,
+});
 
-const result = await checkout(async ({ saga, deps }) => {
-  const reservation = await saga.step(
+const result = await checkout.run(async ({ step, deps }) => {
+  const reservation = await step(
     'reserveInventory',
     () => deps.reserveInventory(items),
-    { compensate: (res) => releaseInventory(res.id) }
+    { compensate: (res) => deps.releaseInventory(res.id) },
   );
 
-  const payment = await saga.step(
+  const payment = await step(
     'chargeCard',
     () => deps.chargeCard(amount),
-    { compensate: (p) => refundPayment(p.transactionId) }
+    { compensate: (p) => deps.refundPayment(p.transactionId) },
   );
 
   // If shipping fails, compensations run automatically in reverse order:
   // 1. refundPayment, 2. releaseInventory
-  await saga.step('scheduleShipping', () => deps.scheduleShipping(reservation.id));
+  await step('scheduleShipping', () => deps.scheduleShipping(reservation.id));
 
   return { reservation, payment };
 });
@@ -127,90 +131,9 @@ yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 | **Saga/Rollback** | Built-in (`createSagaWorkflow`) | Manual | Manual |
 | **Circuit Breaker** | Built-in | Manual | Manual |
 
-### Type-Safe Fetch for Checkout APIs (v1.11.0)
+### HTTP Boundaries with Awaitly 4
 
-For checkout flows calling external APIs, `awaitly/fetch` provides type-safe HTTP operations:
-
-```typescript
-import { fetchJson } from 'awaitly/fetch';
-
-// Define custom error types for checkout
-type CheckoutApiError =
-  | { type: 'INVENTORY_UNAVAILABLE'; productId: string }
-  | { type: 'PAYMENT_DECLINED'; reason: string }
-  | { type: 'SHIPPING_UNAVAILABLE'; address: string }
-  | { type: 'API_ERROR'; status: number };
-
-const checkInventory = (productId: string, quantity: number) =>
-  fetchJson<{ available: boolean; reserved?: string }>(
-    `/api/inventory/${productId}/check`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ quantity }),
-      mapError: (status, body): CheckoutApiError => {
-        if (status === 409) {
-          return { type: 'INVENTORY_UNAVAILABLE', productId };
-        }
-        return { type: 'API_ERROR', status };
-      },
-    }
-  );
-
-const processPayment = (paymentData: PaymentRequest) =>
-  fetchJson<PaymentResult>('/api/payments', {
-    method: 'POST',
-    body: JSON.stringify(paymentData),
-    mapError: (status, body): CheckoutApiError => {
-      if (status === 402) {
-        return { type: 'PAYMENT_DECLINED', reason: body?.message ?? 'Unknown' };
-      }
-      return { type: 'API_ERROR', status };
-    },
-  });
-
-// Usage in checkout workflow
-const checkout = createSagaWorkflow({
-  checkInventory,
-  processPayment,
-  scheduleShipping,
-});
-
-const result = await checkout(async ({ saga, deps }) => {
-  // Check inventory with typed error
-  const inventory = await saga.step(
-    'checkInventory',
-    () => deps.checkInventory(item.productId, item.quantity),
-    { compensate: (inv) => releaseInventory(inv.reserved!) }
-  );
-
-  // Process payment with typed error
-  const payment = await saga.step(
-    'processPayment',
-    () => deps.processPayment({ amount, card }),
-    { compensate: (p) => refundPayment(p.transactionId) }
-  );
-
-  return { orderId: payment.orderId };
-});
-
-// Handle specific checkout errors
-if (!result.ok) {
-  switch (result.error.type) {
-    case 'INVENTORY_UNAVAILABLE':
-      return { error: `Product ${result.error.productId} is out of stock` };
-    case 'PAYMENT_DECLINED':
-      return { error: `Payment declined: ${result.error.reason}` };
-    case 'SHIPPING_UNAVAILABLE':
-      return { error: 'Shipping not available to your address' };
-  }
-}
-```
-
-**Benefits:**
-- Type-safe error mapping from HTTP status codes
-- Automatic error type inference in workflows
-- No manual Result wrapping of fetch calls
-- Built-in handling of network errors
+Awaitly 4 has no `awaitly/fetch`. Use native `fetch` and wrap the boundary with `tryAsync`, mapping transport and status failures into the checkout domain error union. This keeps HTTP policy application-specific while preserving typed workflow errors.
 
 ## Conclusion
 

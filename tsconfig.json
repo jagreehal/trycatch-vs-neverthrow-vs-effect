@@ -1,16 +1,33 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ES2022", 
+    "target": "ES2022",
+    "module": "preserve",
+    "noEmit": true,
     "moduleResolution": "bundler",
+    "moduleDetection": "force",
     "lib": ["ES2020", "ES2018", "ES2015", "DOM"],
     "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noImplicitOverride": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "outDir": "dist",
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals"],
+    "composite": true,
+    "incremental": true,
+    "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": ["dist", "node_modules"]
 }

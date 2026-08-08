@@ -8,13 +8,16 @@ See the code: `multi-tenant-workflow.test.ts`
 ## The Approaches
 
 ### 1. The Awaitly Approach
+
+*This scenario uses `createWorkflow` because tenant processing needs conditional steps and HITL. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+
 *Just JavaScript.*
 
 Since Awaitly uses standard `async/await`, you can use standard JavaScript control flow statements like `if`, `else`, and `switch`.
 
 ```typescript
 // It's just standard code!
-return workflow(async ({ step, deps }) => {
+return workflow.run(async ({ step, deps }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId), {
     description: 'Fetch tenant',
     key: `tenant:${tenantId}`,
@@ -27,7 +30,7 @@ if (tenant.plan === 'free') {
     { description: 'Calculate usage (free plan)', key: `usage:${tenantId}:free` }
   );
 } else {
-  const { users, resources } = await step.parallel('Fetch tenant data', {
+  const { users, resources } = await step.all('Fetch tenant data', {
     users: () => deps.fetchUsers(tenantId),
     resources: () => deps.fetchResources(tenantId),
   }
@@ -66,7 +69,7 @@ if (tenant.plan === 'free') {
 #### Approval Workflows for Enterprise Tenants
 
 ```typescript
-import { createHITLOrchestrator, pendingApproval } from 'awaitly/hitl';
+import { createHITLOrchestrator, pendingApproval } from 'awaitly/durable';
 
 const orchestrator = createHITLOrchestrator({ approvalStore, workflowStateStore });
 
@@ -136,13 +139,13 @@ Effect.gen(function* () {
 | **Approval Workflows** | Built-in (HITL) | Manual | Manual |
 | **Durable Execution** | Built-in | Manual | Manual |
 
-### Rate-Limited Tenant Processing with step.sleep() (v1.11.0)
+### Rate-Limited Tenant Processing with step.sleep() (Awaitly 4)
 
 For multi-tenant workflows that need rate limiting between API calls:
 
 ```typescript
-import { createWorkflow } from 'awaitly/workflow';
-import { seconds, minutes } from 'awaitly/duration';
+import { createWorkflow } from 'awaitly';
+import { seconds, minutes } from 'awaitly';
 
 const processTenants = createWorkflow('processTenants', {
   fetchTenants,
@@ -151,9 +154,9 @@ const processTenants = createWorkflow('processTenants', {
   syncToDataWarehouse,
 });
 
-const result = await processTenants(async ({ step, deps }) => {
+const result = await processTenants.run(async ({ step, deps }) => {
   const tenants = await step('fetchTenants', () => deps.fetchTenants(), {
-    name: 'Fetch all tenants',
+    description: 'Fetch all tenants',
     key: 'fetch-tenants',
   });
 
@@ -204,49 +207,13 @@ const result = await processTenants(async ({ step, deps }) => {
 - Polling intervals with backoff
 - Graceful delays before cleanup
 
-### Functional Composition for Tenant Processing (v1.11.0)
+### Result Composition for Tenant Processing (Awaitly 4)
 
-For teams preferring Effect-style composition:
-
-```typescript
-import { pipe, flow, R } from 'awaitly/functional';
-
-// Define reusable tenant processing pipeline
-const processTenantUsage = flow(
-  fetchTenantData,
-  R.andThen(calculateUsage),
-  R.map((usage) => ({ ...usage, timestamp: Date.now() })),
-  R.mapError((e) => new TenantProcessingError(e))
-);
-
-// Use in workflow
-const workflow = createWorkflow('workflow', { processTenantUsage, sendBilling });
-
-const result = await workflow(async ({ step, deps }) => {
-  const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId));
-
-  // Compose validation pipeline
-  const validated = pipe(
-    tenant,
-    validateTenantActive,
-    R.andThen(validateBillingInfo),
-    R.andThen(validateUsageLimits)
-  );
-
-  if (!validated.ok) {
-    return err(validated.error);
-  }
-
-  const usage = await step('processTenantUsage', () => deps.processTenantUsage(tenant));
-  await step('sendBilling', () => deps.sendBilling(tenant, usage));
-
-  return { tenantId: tenant.id, billed: usage.total };
-});
-```
+Awaitly 4 exports Result combinators from `awaitly` and `awaitly/result`. For this multi-step tenant workflow, `run(deps, fn)` or `createWorkflow()` remains the clearest form; there is no `awaitly/functional` entry point.
 
 ## Conclusion
 
 For **Logic with Branching (Multi-Tenant)**:
-- **Awaitly** offers the best DX: imperative control flow, automatic type unions, built-in support for approval workflows (HITL), durable execution, rate limiting with `step.sleep()`, and optional Effect-style composition with `awaitly/functional`.
+- **Awaitly** offers the best DX: imperative control flow, automatic type unions, built-in support for approval workflows (HITL), durable execution, rate limiting with `step.sleep()`, and root Result combinators.
 - **Effect** offers excellent syntax via generators and powerful concurrency, but lacks built-in HITL.
 - **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic.

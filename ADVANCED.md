@@ -421,9 +421,14 @@ Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece. No ne
 ### Approach 3: The Orchestrator (Awaitly)
 
 ```typescript
-import { ok, err, type AsyncResult } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
-import { retryPolicies } from 'awaitly/policies';
+import {
+  ok,
+  err,
+  createWorkflow,
+  isUnexpectedError,
+  retryPolicies,
+  type AsyncResult,
+} from 'awaitly';
 
 // Type-safe error types
 type PaymentError =
@@ -541,16 +546,16 @@ export async function createPaymentAwaitly(
 ) {
   const workflow = createWorkflow('payment', paymentDeps);
 
-  return workflow(async ({ step, deps }) => {
+  return workflow.run(async ({ step, deps }) => {
     // 1) Validate input
     const input = await step('parse', () => deps.parse(raw), {
-      name: 'Parse input',
+      description: 'Parse input',
       key: 'parse',
     });
 
     // 2) Check for existing payment (idempotency)
     const existing = await step('findExisting', () => deps.findExisting(db, input.idemKey), {
-      name: 'Check existing',
+      description: 'Check existing',
       key: `existing:${input.idemKey}`,
     });
 
@@ -560,40 +565,28 @@ export async function createPaymentAwaitly(
 
     // 3) Acquire lock
     await step('acquireLock', () => deps.acquireLock(db, input.idemKey), {
-      name: 'Acquire lock',
+      description: 'Acquire lock',
       key: `lock:${input.idemKey}`,
     });
 
-    // 4) Call provider with retry and timeout
-    let response: ProviderResponse;
-    try {
-      response = await step.retry(
-        'callProvider',
-        () => deps.callProvider(provider, input),
-        {
-          attempts: 3,
-          backoff: 'exponential',
-          initialDelay: 200,
-          maxDelay: 3000,
-          jitter: true,
-          retryOn: (error) =>
-            error instanceof ProviderSoftFail ||
-            error instanceof TimeoutError,
-          name: 'Call provider',
-          key: `provider:${input.idemKey}`,
-        }
-      );
-    } catch (e) {
-      // Soft failures: persist failure record, then fail
-      if (e instanceof ProviderSoftFail || e instanceof TimeoutError) {
-        await step('persistFailure', () => deps.persistFailure(db, actorEmail, input, e), {
-          name: 'Persist failure',
-          key: `persist-fail:${input.idemKey}`,
-        });
-        throw new ProviderUnavailable(String(e));
+    // 4) Call provider with retry and timeout. No try/catch: callProvider
+    //    returns a Result, so a soft failure is a value, not an exception.
+    //    On a hard failure the step short-circuits and workflow.run resolves
+    //    to that error — the boundary decides what to do about it.
+    const response = await step.retry(
+      'callProvider',
+      () => deps.callProvider(provider, input),
+      {
+        attempts: 3,
+        backoff: 'exponential',
+        initialDelay: 200,
+        maxDelay: 3000,
+        jitter: true,
+        shouldRetry: (error) => error instanceof ProviderSoftFail,
+        timeout: { ms: 5000 },
+        key: `provider:${input.idemKey}`,
       }
-      throw e;
-    }
+    );
 
     // 5) Persist success
     const paymentId = await step(
@@ -608,6 +601,26 @@ export async function createPaymentAwaitly(
     return { paymentId };
   });
 }
+
+// Boundary: the workflow never throws, so failure handling lives in one place
+export async function handleCreatePayment(
+  db: Db,
+  provider: Provider,
+  raw: unknown,
+  actorEmail: string
+) {
+  const result = await createPaymentAwaitly(db, provider, raw, actorEmail);
+  if (result.ok) return { status: 201, body: result.value };
+
+  if (isUnexpectedError(result.error)) {
+    console.error('Bug:', result.error.cause);
+    return { status: 500 };
+  }
+
+  if (result.error instanceof ProviderSoftFail) return { status: 503 };
+  if (result.error instanceof IdempotencyConflict) return { status: 409 };
+  return { status: 400 };
+}
 ```
 
 **What makes this work well:**
@@ -618,7 +631,7 @@ The code reads like standard JavaScript. No method chaining or generator syntax 
 
 **2. Built-in retry and timeout**
 
-`step.retry()` handles exponential backoff with jitter out of the box. No need to write custom retry logic or import additional libraries.
+`step.retry()` handles exponential backoff with jitter out of the box, and takes `timeout` in the same options object. No custom retry logic, no extra library, and no `try`/`catch` around the step — errors from a step propagate to the workflow result, so wrapping one in `try`/`catch` only breaks that guarantee. When you genuinely need to convert a *throwing* API into a typed error, `step.try(id, fn, { error | onError, retry?, timeout?, compensate? })` is the one wrapper that does it.
 
 **3. Step caching with keys**
 
@@ -658,17 +671,17 @@ const result = await durable.run(
     // Each keyed step is automatically checkpointed
     const charge = await step('chargeCard', () => deps.chargeCard(payment), {
       key: 'charge',
-      name: 'Charge card',
+      description: 'Charge card',
     });
 
     await step('updateInventory', () => deps.updateInventory(items), {
       key: 'inventory',
-      name: 'Update inventory',
+      description: 'Update inventory',
     });
 
     await step('sendReceipt', () => deps.sendReceipt(charge), {
       key: 'receipt',
-      name: 'Send receipt',
+      description: 'Send receipt',
     });
 
     return { paymentId: charge.id };
@@ -689,37 +702,57 @@ if (!result.ok && isWorkflowCancelled(result.error)) {
 - **Crash recovery**: Resume from last completed step on restart
 - **Version management**: Reject resume if workflow logic changed
 - **Concurrency control**: Prevent duplicate executions of the same workflow ID
+- **Drift detection**: A resume whose step order no longer matches the snapshot fails instead of replaying
+
+**Resume safety in Awaitly 4.** Bound step keys are position-derived (`getUser`, `getUser#2`, …), so inserting or reordering a dep call used to shift every later suffix — a resumed run could read a *different* step's checkpoint under the same key and carry on with the wrong value. Avoiding that depended on remembering to bump `version`.
+
+Snapshots now record the executed step order, and a mismatched resume fails with `WorkflowShapeDriftError` — carrying `workflowId`, `stepIndex`, `expectedStepKey`, and `actualStepKey` — rather than replaying against the wrong checkpoints. It is raised from the new `onBeforeStep(stepKey, workflowId, context, info)` hook, which fires before every step, including one about to be served from the cache or a snapshot, and before that stored value is read. That is the only point at which a stale checkpoint can still be rejected, since `onAfterStep` never fires for a replayed step:
+
+```typescript
+const result = await durable.run(deps, fn, {
+  id: `checkout-${orderId}`,
+  version: 1,
+  store,
+  onBeforeStep: (stepKey, workflowId, _ctx, info) => {
+    // info.argsFingerprint tells you which arguments a bound step was called
+    // with. undefined means "no information" — never read it as "unchanged".
+    log.debug({ workflowId, stepKey, args: info.argsFingerprint });
+  },
+});
+```
 
 #### Saga Pattern (Automatic Compensation)
 
 Define compensating actions for rollback when downstream steps fail:
 
 ```typescript
-import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/durable';
 
-const checkout = createSagaWorkflow({
+const checkout = createSagaWorkflow('checkout', {
   reserveInventory,
+  releaseInventory,
   chargeCard,
+  refundPayment,
   scheduleShipping,
 });
 
-const result = await checkout(async ({ saga, deps }) => {
+const result = await checkout.run(async ({ step, deps }) => {
   // Step 1: Reserve inventory (with compensation)
-  const reservation = await saga.step(
+  const reservation = await step(
     'Reserve inventory',
     () => deps.reserveInventory(items),
-    { compensate: (res) => releaseInventory(res.reservationId) }
+    { compensate: (res) => deps.releaseInventory(res.reservationId) },
   );
 
   // Step 2: Charge card (with compensation)
-  const payment = await saga.step(
+  const payment = await step(
     'Charge card',
     () => deps.chargeCard(amount),
-    { compensate: (p) => refundPayment(p.transactionId) }
+    { compensate: (p) => deps.refundPayment(p.transactionId) },
   );
 
   // Step 3: Schedule shipping (no compensation needed)
-  await saga.step('Schedule shipping', () => deps.scheduleShipping(reservation.id));
+  await step('Schedule shipping', () => deps.scheduleShipping(reservation.id));
 
   return { reservation, payment };
 });
@@ -735,8 +768,8 @@ if (!result.ok && isSagaCompensationError(result.error)) {
 
 **Key features:**
 - **LIFO compensation**: Compensations run in reverse order automatically
-- **`saga.step`**: Execute Result-returning operations with optional compensation
-- **`saga.tryStep`**: Execute throwing operations with error mapping
+- **`step(..., { compensate })`**: Execute Result-returning operations with optional compensation
+- **`step.try`**: Execute throwing operations with error mapping
 - **Compensation error tracking**: Know which compensations failed and why
 
 #### Circuit Breaker
@@ -748,7 +781,7 @@ import {
   createCircuitBreaker,
   circuitBreakerPresets,
   isCircuitOpenError,
-} from 'awaitly/circuit-breaker';
+} from 'awaitly';
 
 // Use presets for common scenarios
 const paymentBreaker = createCircuitBreaker(
@@ -768,7 +801,7 @@ const apiBreaker = createCircuitBreaker('external-api', {
 });
 
 // In workflow
-const result = await workflow(async ({ step, deps }) => {
+const result = await workflow.run(async ({ step, deps }) => {
   // executeResult returns a Result, no exceptions
   const data = await paymentBreaker.executeResult(() =>
     step('chargeCard', () => deps.chargeCard(payment))
@@ -798,7 +831,7 @@ import {
   createRateLimiter,
   createConcurrencyLimiter,
   createCombinedLimiter,
-} from 'awaitly/ratelimit';
+} from 'awaitly';
 
 // Rate limiting (requests per second)
 const apiLimiter = createRateLimiter('stripe-api', {
@@ -821,7 +854,7 @@ const limiter = createCombinedLimiter('api', {
 });
 
 // Usage in workflow
-const result = await workflow(async ({ step, deps }) => {
+const result = await workflow.run(async ({ step, deps }) => {
   // Rate-limited API call
   const data = await apiLimiter.execute(() =>
     step('callApi', () => deps.callExternalApi())
@@ -847,7 +880,7 @@ import {
   timeoutPolicies,
   withPolicy,
   createPolicyRegistry,
-} from 'awaitly/policies';
+} from 'awaitly';
 
 // Pre-built service policies
 // servicePolicies.httpApi: 5s timeout, 3 retries with exponential backoff
@@ -876,7 +909,7 @@ const data = await step(
 );
 
 // Compose policies
-import { mergePolicies } from 'awaitly/policies';
+import { mergePolicies } from 'awaitly';
 
 const customPolicy = mergePolicies(
   timeoutPolicies.api, // 5s timeout
@@ -890,7 +923,7 @@ const customPolicy = mergePolicies(
 Deduplicate concurrent identical requests:
 
 ```typescript
-import { singleflight } from 'awaitly/singleflight';
+import { singleflight } from 'awaitly';
 
 const fetchUserOnce = singleflight(fetchUser, {
   key: (id) => `user:${id}`,
@@ -912,67 +945,100 @@ const [user1, user2, user3] = await Promise.all([
 - Deduplicate API calls during page load
 - Share expensive computations across callers
 
-#### Streaming with Results (v1.11.0)
+#### Streaming with Results (Awaitly 4)
 
-The `awaitly/streaming` module provides Result-aware stream processing with transformers and backpressure handling:
+`awaitly/durable` provides Result-aware stream processing with transformers and backpressure handling:
 
 ```typescript
+import { createWorkflow, tryAsync, type AsyncResult } from 'awaitly';
 import {
   createMemoryStreamStore,
   createFileStreamStore,
+  pipe,
   map,
   filter,
   flatMap,
   chunk,
   take,
-  skip,
   collect,
   reduce,
-} from 'awaitly/streaming';
+} from 'awaitly/durable';
 
-// Create stream stores for workflow integration
-const memoryStore = createMemoryStreamStore<string>();
-const fileStore = createFileStreamStore('./output.txt');
+// Stream stores are workflow options — step.getReadable/getWritable use them
+const streamStore = createMemoryStreamStore();
+// const streamStore = createFileStreamStore('./output.txt');
 
-await run(async ({ step }) => {
-  // Get writable and readable streams within workflow
-  const writable = await step.getWritable(memoryStore, { key: 'stream-output' });
-  const readable = await step.getReadable(memoryStore, { key: 'stream-input' });
+// collect()/reduce() are terminal consumers: they throw rather than returning a
+// Result, so a caller who just wants an array gets one. Inside a workflow you
+// still get typed errors — see the note under this example.
+const collectBatches = (
+  source: AsyncIterable<string[]>
+): AsyncResult<string[][], 'COLLECT_FAILED'> =>
+  tryAsync(() => collect(source), () => 'COLLECT_FAILED');
 
-  // Transform pipeline with Result-aware operators
-  const processed = readable
-    .pipeThrough(map((line) => ok(line.toUpperCase())))
-    .pipeThrough(filter((line) => line.startsWith('VALID:')))
-    .pipeThrough(flatMap((line) => ok(line.split(',')))) // One-to-many
-    .pipeThrough(chunk(100)) // Batch into arrays of 100
-    .pipeThrough(take(1000)); // Limit total items
+const workflow = createWorkflow('streamPipeline', { collectBatches }, { streamStore });
 
-  // Collect all results
-  const results = await step('collect', () => collect(processed));
+await workflow.run(async ({ step, deps }) => {
+  const reader = step.getReadable<string>({ namespace: 'input' });
+  const writer = step.getWritable<string>({ namespace: 'output' });
 
-  // Or reduce to a single value
-  const count = await step('reduce', () => reduce(processed, (acc, item) => acc + 1, 0));
+  // Data-first transformers, composed with pipe() (up to eight stages since
+  // Awaitly 4.1; nest another pipe() for more)
+  const processed = pipe(
+    reader,
+    (s) => map(s, (line) => line.toUpperCase()),
+    (s) => filter(s, (line) => line.startsWith('VALID:')),
+    (s) => flatMap(s, (line) => line.split(',')), // One-to-many
+    (s) => chunk(s, 100) // Batch into arrays of 100
+  );
+  const limited = take(processed, 1000); // Limit total batches
 
-  return { results, count };
+  const results = await step('collectBatches', () => deps.collectBatches(limited));
+
+  await writer.write(`processed ${results.length} batches`);
+  await writer.close();
+
+  return { batches: results.length };
 });
 ```
+
+**How stream failures surface (Awaitly 4.1):**
+
+`reader.read()` models a read failure as a Result, but iterating a reader — `for await`, a transformer, or `collect()` — turns it back into a throw. Awaitly sorts the two cases at the workflow boundary:
+
+| What failed | How it arrives |
+| --- | --- |
+| The stream itself (`STREAM_READ_ERROR`, `STREAM_STORE_ERROR`, ...) | A typed error value in `result.error`, the same treatment `STEP_TIMEOUT` gets — never wrapped in `UnexpectedError` |
+| Your own transform callback threw | `UnexpectedError`, with the original throw on `.cause` |
+
+```typescript
+if (!result.ok) {
+  switch (result.error.type ?? result.error) {
+    case 'STREAM_READ_ERROR': return { status: 503 }; // store is down, retry
+    case 'STEP_TIMEOUT': return { status: 504 };
+  }
+}
+```
+
+That split is the point: the library's own failures are values you can act on, and only genuine bugs stay exceptions. To get it into the *static* union so a boundary switch stays exhaustive, declare it like any other error — `createWorkflow(name, deps, { streamStore, errors: ['STREAM_READ_ERROR'] })`. The `tryAsync` wrapper above is then only needed for throws from your own callbacks.
 
 **Backpressure Handling:**
 
 ```typescript
-import { createBackpressuredWriter } from 'awaitly/streaming';
+import { createBackpressureController, shouldApplyBackpressure } from 'awaitly/durable';
 
-const writer = createBackpressuredWriter(writable, {
+const controller = createBackpressureController({
   highWaterMark: 1000,
-  onBackpressure: () => console.log('Slowing down...'),
-  onDrain: () => console.log('Resuming...'),
+  onStateChange: (state) => console.log(`Backpressure: ${state}`),
 });
 
-// Automatically pauses when buffer is full
+// Pause production when buffer is full
 for (const item of hugeDataset) {
-  await writer.write(item);
+  if (shouldApplyBackpressure(controller)) {
+    await controller.waitForDrain();
+  }
+  await writable.write(item);
 }
-await writer.close();
 ```
 
 **Limitations vs Effect Stream:**
@@ -980,174 +1046,28 @@ await writer.close();
 - Less sophisticated backpressure strategies
 - Simpler API trades off some power for familiarity
 
-#### Functional Utilities (v1.11.0)
+#### Result Composition and HTTP Boundaries (Awaitly 4)
 
-The `awaitly/functional` module provides Effect-style composition utilities:
+Awaitly 4 collapses thirteen entry points into four. Nothing was dropped — the exports moved:
 
-```typescript
-import { pipe, flow, compose, R } from 'awaitly/functional';
+| Entry | Contents |
+| --- | --- |
+| `awaitly` | Result primitives, `run()`, `createWorkflow`, steps, resources, batching, per-dep policies, circuit breaker, rate limiting, cache, durations |
+| `awaitly/result` | Result primitives only (minimal bundle) |
+| `awaitly/durable` | Durable execution, persistence, sagas, human-in-the-loop, streaming, webhooks, engine |
+| `awaitly/testing` | Test utilities (kept out of production bundles) |
 
-// pipe: Apply functions left-to-right to a value
-const result = pipe(
-  { name: 'Alice', age: 30 },
-  R.map((user) => ({ ...user, name: user.name.toUpperCase() })),
-  R.andThen((user) => validateUser(user)),
-  R.mapError((e) => new ApiError(e))
-);
+Migration map: `awaitly/run`, `awaitly/workflow`, and `awaitly/reliability` → `awaitly`; `awaitly/persistence`, `awaitly/saga`, `awaitly/hitl`, `awaitly/streaming`, `awaitly/webhook`, and `awaitly/engine` → `awaitly/durable`. `awaitly` still re-exports nothing from `awaitly/durable`, so CommonJS and non-tree-shaking consumers do not pull the production graph in through the front door.
 
-// flow: Create reusable pipelines (functions, not values)
-const processOrder = flow(
-  validateOrder,
-  R.andThen(calculateTotal),
-  R.andThen(applyDiscount),
-  R.mapError(toOrderError)
-);
+Result combinators such as `map`, `andThen`, `all`, and `allAsync` come from the root or `awaitly/result`. Wrap native `fetch` with `tryAsync` and map failures into domain errors.
 
-const result = await processOrder(orderData);
-
-// compose: Like flow but right-to-left (traditional FP style)
-const processOrder = compose(
-  R.mapError(toOrderError),
-  R.andThen(applyDiscount),
-  R.andThen(calculateTotal),
-  validateOrder
-);
-```
-
-**R Namespace (Curried Pipeable Functions):**
-
-```typescript
-import { R } from 'awaitly/functional';
-
-// R provides curried versions for use in pipe/flow
-R.map((x) => x * 2)           // Result<A, E> => Result<B, E>
-R.mapError((e) => new Error(e)) // Result<A, E1> => Result<A, E2>
-R.andThen((x) => fetchData(x))  // Result<A, E1> => Result<B, E1 | E2>
-R.orElse((e) => ok(defaultValue)) // Result<A, E> => Result<A, never>
-R.unwrapOr(defaultValue)        // Result<A, E> => A
-R.tap((x) => console.log(x))    // Side effect without changing value
-R.tapError((e) => logError(e))  // Side effect on error
-```
-
-**Collection Utilities:**
-
-```typescript
-import { all, allAsync, allSettled, any, race, traverse } from 'awaitly/functional';
-
-// all: Combine sync Results (first-error semantics)
-const result = all([validateA(a), validateB(b), validateC(c)]);
-
-// allAsync: Combine async Results
-const result = await allAsync([fetchA(), fetchB(), fetchC()]);
-
-// allSettled: Collect all errors
-const result = allSettled([validateA(a), validateB(b), validateC(c)]);
-
-// any: First success wins
-const result = await any([tryCache(), tryDb(), tryApi()]);
-
-// race: First to complete (success or error)
-const result = await race([fastApi(), slowApi()]);
-
-// traverse: Map then combine
-const result = await traverse(userIds, (id) => fetchUser(id));
-```
-
-**Limitations vs Effect:**
-- No Fiber semantics or structured concurrency
-- No Effect's Layer/Context for dependency injection
-- Designed as a stepping stone, not a replacement
-
-#### Type-Safe Fetch (v1.11.0)
-
-The `awaitly/fetch` module provides type-safe HTTP operations with built-in error types:
-
-```typescript
-import { fetchJson, fetchText, fetchBlob, fetchArrayBuffer } from 'awaitly/fetch';
-
-// Basic usage with automatic error typing
-const result = await fetchJson<User>('https://api.example.com/users/1');
-
-if (!result.ok) {
-  // Error types: NOT_FOUND | BAD_REQUEST | UNAUTHORIZED | FORBIDDEN | SERVER_ERROR | NETWORK_ERROR
-  switch (result.error.type) {
-    case 'NOT_FOUND':
-      console.log('User not found');
-      break;
-    case 'UNAUTHORIZED':
-      console.log('Please log in');
-      break;
-    case 'NETWORK_ERROR':
-      console.log('Check your connection');
-      break;
-    case 'SERVER_ERROR':
-      console.log(`Server error: ${result.error.status}`);
-      break;
-  }
-}
-
-// With request options
-const result = await fetchJson<CreateUserResponse>('https://api.example.com/users', {
-  method: 'POST',
-  body: JSON.stringify({ name: 'Alice' }),
-  headers: { 'Content-Type': 'application/json' },
-});
-
-// Other fetch helpers
-const textResult = await fetchText('https://api.example.com/readme');
-const blobResult = await fetchBlob('https://api.example.com/image.png');
-const bufferResult = await fetchArrayBuffer('https://api.example.com/binary');
-```
-
-**Custom Error Mapping:**
-
-```typescript
-type MyError =
-  | { type: 'USER_NOT_FOUND'; userId: string }
-  | { type: 'VALIDATION_ERROR'; fields: string[] }
-  | { type: 'API_ERROR'; status: number };
-
-const result = await fetchJson<User, MyError>('https://api.example.com/users/1', {
-  mapError: (status, body) => {
-    if (status === 404) {
-      return { type: 'USER_NOT_FOUND', userId: body?.userId ?? 'unknown' };
-    }
-    if (status === 400) {
-      return { type: 'VALIDATION_ERROR', fields: body?.errors ?? [] };
-    }
-    return { type: 'API_ERROR', status };
-  },
-});
-```
-
-**In Workflows:**
-
-```typescript
-const workflow = createWorkflow('fetchUserPosts', {
-  fetchUser: (id: string) => fetchJson<User>(`/api/users/${id}`),
-  fetchPosts: (userId: string) => fetchJson<Post[]>(`/api/users/${userId}/posts`),
-});
-
-const result = await workflow(async ({ step, deps }) => {
-  const user = await step('getUser', () => deps.fetchUser('1'));
-  const posts = await step('getPosts', () => deps.fetchPosts(user.id));
-  return { user, posts };
-});
-// Error type automatically includes: NOT_FOUND | BAD_REQUEST | ... | UnexpectedError
-```
-
-**Limitations vs Effect HttpClient:**
-- Less configurability (interceptors, retry policies built into client)
-- No request/response middleware pipeline
-- Simpler API for common use cases
-
-#### step.sleep() with Duration Support (v1.11.0)
+#### step.sleep() with Duration Support (Awaitly 4)
 
 Cancellation-aware delays with human-readable duration strings:
 
 ```typescript
-import { run } from 'awaitly/run';
-import { seconds, minutes, hours, days, ms } from 'awaitly/duration';
+import { run } from 'awaitly';
+import { seconds, minutes, hours, days, millis } from 'awaitly';
 
 await run(async ({ step }) => {
   // String duration syntax (human-readable): ID first, then duration
@@ -1161,7 +1081,7 @@ await run(async ({ step }) => {
   await step.sleep('delay', seconds(5));
   await step.sleep('delay', minutes(1));
   await step.sleep('delay', hours(2));
-  await step.sleep('delay', ms(500));
+  await step.sleep('delay', millis(500));
 
   // Combined durations
   await step.sleep('delay', minutes(1) + seconds(30));
@@ -1204,9 +1124,11 @@ await run(async ({ step }) => {
 - Scheduled tasks within workflows
 - Graceful shutdown with timeout
 
-#### ESLint Plugin (eslint-plugin-awaitly v0.5.0)
+#### ESLint Plugin (eslint-plugin-awaitly v3.0.0)
 
 Catch common Awaitly mistakes at compile time:
+
+Two rules are **gone** in v3: `workflow-prefer-step-if` and `workflow-prefer-step-foreach`. They existed only because the analyzer could not identify a raw `if` or `for...of` branch, so diagrams needed `step.if` / `step.forEach` wrappers to stay readable. Awaitly 4's analyzer derives a stable id from the branch's own expression (`user.isPremium` → `user-is-premium`), so plain control flow is diagrammable and the wrappers are no longer worth enforcing. Derivation is deliberately conservative — an expression it cannot encode losslessly (calls, arithmetic) yields no id and the node stays unlabelled. If your config still lists either rule, delete the entry: ESLint errors on unknown rule names.
 
 ```javascript
 // eslint.config.mjs
@@ -1218,28 +1140,28 @@ export default [
     plugins: { awaitly: awaitlyPlugin },
     rules: {
       // Prevents step(fn()) - must be step(() => fn())
-      'awaitly/no-immediate-execution': 'error',
+      'awaitly/step-no-immediate-execution': 'error',
 
       // Requires thunk when using key option (for caching)
-      'awaitly/require-thunk-for-key': 'error',
+      'awaitly/step-require-thunk-for-key': 'error',
 
       // Warns about dynamic cache keys that may cause issues
-      'awaitly/stable-cache-keys': 'warn',
+      'awaitly/step-stable-cache-keys': 'warn',
 
       // Ensures workflows are awaited (no floating promises)
-      'awaitly/no-floating-workflow': 'error',
+      'awaitly/workflow-no-floating': 'error',
 
       // Ensures Results are handled (like neverthrow/must-use-result)
-      'awaitly/no-floating-result': 'error',
+      'awaitly/result-no-floating': 'error',
 
       // Enforces .ok checks before accessing .value
-      'awaitly/require-result-handling': 'warn',
+      'awaitly/result-require-handling': 'warn',
 
       // Prevents options on executor instead of step
-      'awaitly/no-options-on-executor': 'error',
+      'awaitly/workflow-options-position': 'error',
 
       // Prevents ok(ok(...)) double wrapping
-      'awaitly/no-double-wrap-result': 'error',
+      'awaitly/result-no-double-wrap': 'error',
     },
   },
 ];
@@ -1255,7 +1177,7 @@ export default [
 | `no-floating-workflow` | Ensures `createWorkflow(...)` is awaited | No |
 | `no-floating-result` | Ensures `Result` values are checked or used | No |
 | `require-result-handling` | Warns when accessing `.value` without `.ok` check | No |
-| `no-options-on-executor` | Prevents `workflow(async ({ step }) => {}, { retry })` | Yes |
+| `no-options-on-executor` | Prevents `workflow.run(async ({ step }) => {}, { retry })` | Yes |
 | `no-double-wrap-result` | Prevents `ok(ok(value))` or `err(err(e))` | Yes |
 
 **Example Violations:**
@@ -1301,7 +1223,7 @@ import {
   createMemoryApprovalStore,
   createMemoryWorkflowStateStore,
   createApprovalStep,
-} from 'awaitly/hitl';
+} from 'awaitly/durable';
 
 const orchestrator = createHITLOrchestrator({
   approvalStore: createMemoryApprovalStore(),
@@ -1366,13 +1288,12 @@ import { Effect, Layer, Context, Schedule, Duration } from 'effect';
 import * as STM from 'effect/STM';
 
 // Service tags for dependency injection
-export const DbService = Context.GenericTag<Db>('DbService');
-export const ProviderService = Context.GenericTag<Provider>('ProviderService');
+export const DbService = Context.Service<Db>('DbService');
+export const ProviderService = Context.Service<Provider>('ProviderService');
 
 const retrySchedule = Schedule.exponential(Duration.millis(200)).pipe(
   Schedule.jittered,
-  Schedule.upTo(Duration.seconds(3)),
-  Schedule.recurs(2)
+  Schedule.upTo({ duration: Duration.seconds(3), times: 2 })
 );
 
 // Pure functions that return Effects (composable building blocks)
@@ -1417,18 +1338,15 @@ const callProvider = (input: CreatePayment) =>
     });
 
     return yield* call.pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(2000),
-        onTimeout: () => new TimeoutError('Timed out after 2000ms'),
+        orElse: () => Effect.fail(new TimeoutError('Timed out after 2000ms')),
       }),
-      Effect.retry(
-        retrySchedule.pipe(
-          Schedule.whileInput(
-            (err: unknown) =>
-              err instanceof TimeoutError || err instanceof ProviderSoftFail
-          )
-        )
-      )
+      Effect.retry({
+        schedule: retrySchedule,
+        while: (err: unknown) =>
+          err instanceof TimeoutError || err instanceof ProviderSoftFail,
+      })
     );
   });
 
@@ -1510,7 +1428,7 @@ export const createPaymentEffect = (raw: unknown, actorEmail: string) =>
 
     // Call provider with error recovery
     const response = yield* callProvider(lockedInput).pipe(
-      Effect.catchAll((error) => {
+      Effect.catch((error) => {
         if (
           error instanceof TimeoutError ||
           error instanceof ProviderSoftFail
@@ -1609,9 +1527,30 @@ validateInput(data) // Might switch to error track
 
 The railway model makes failure a first-class concept. You can see the success path and error path clearly. You can handle specific errors at specific points. And you can compose operations without losing error information.
 
-### Awaitly: The Conductor Model
+### Awaitly usage levels
 
-Think of yourself as a conductor leading an orchestra. You don't play every instrument; you coordinate musicians (dependencies) through a performance (workflow).
+Awaitly stacks three optional layers. You can stop at any one.
+
+| Level | Import | When |
+|-------|--------|------|
+| Results only | `awaitly` or `awaitly/result` | Drop-in neverthrow alternative |
+| Composition | Manual checks + `ErrorsOf`, or `run(deps, fn)` | Async sequential work without workflows |
+| Orchestration | `createWorkflow`, `durable` | Caching, resume, HITL, policies |
+
+Entry points:
+
+| Module | Purpose |
+|--------|---------|
+| `awaitly` | `ok`, `err`, combinators, `tryAsync`, `run`, `createWorkflow`, step helpers |
+| `awaitly/result` | Result primitives only, for the minimal-bundle case |
+| `awaitly/durable` | Persist and resume workflows, sagas, HITL, streaming, webhooks, engine |
+| `awaitly/testing` | `unwrapOk`, `unwrapErr`, harnesses, `testWorkflow` |
+
+See [api-comparison.md](./src/comparison/api-comparison.md) for Level 1 and 2 examples.
+
+### Awaitly: The Conductor Model (Level 3)
+
+At Level 3, you coordinate dependencies through `step()` inside `run()` or `createWorkflow()`. Levels 1 and 2 do not require this model.
 
 - **The Score**: Your workflow function is the sheet music
 - **The Musicians**: Dependencies are injected and called via `step()`
@@ -1626,7 +1565,7 @@ Think of yourself as a conductor leading an orchestra. You don't play every inst
 
 ```typescript
 // The conductor coordinates the performance
-workflow(async ({ step, deps }) => {
+workflow.run(async ({ step, deps }) => {
   const user = await step('fetchUser', () => deps.fetchUser(id));    // Violin section
   const posts = await step('fetchPosts', () => deps.fetchPosts(id));  // Brass section
   return { user, posts };                                // Final bow
@@ -1643,18 +1582,18 @@ When you need production-grade reliability, the conductor has access to a full e
 
 ```typescript
 // The full orchestra
-const saga = createSagaWorkflow(deps); // Automatic compensation
+const saga = createSagaWorkflow('apiCall', deps); // Automatic compensation
 const breaker = createCircuitBreaker('api'); // Fail-fast protection
 const limiter = createRateLimiter('api', { maxPerSecond: 10 }); // Tempo control
 
-await saga(async ({ saga, deps }) => {
+await saga.run(async ({ step, deps }) => {
   // Rate-limited, circuit-protected, compensating steps
   const data = await limiter.execute(() =>
     breaker.executeResult(() =>
-      saga.step('callApi', () => deps.callApi(), {
+      step('callApi', () => deps.callApi(), {
         compensate: (d) => deps.rollback(d.id),
-      })
-    )
+      }),
+    ),
   );
   return data;
 });
@@ -1699,7 +1638,8 @@ Refactor your most complex business logic to use Result types (neverthrow or Awa
 
 **Choosing between neverthrow and Awaitly:**
 - **neverthrow**: If your team likes functional chaining (`.andThen().map()`) and you don't need retry/timeout built-in
-- **Awaitly**: If your team prefers async/await and you want retries, timeouts, caching, or workflow resume
+- **Awaitly Level 1**: Same Result model as neverthrow (`ok`/`err`, combinators). No workflows required.
+- **Awaitly Level 3**: Add `run()`/`createWorkflow` when caching, resume, or policies appear
 
 **When to move to Phase 3:**
 - You need consistent policies (timeouts, retries) across your app
@@ -1987,7 +1927,7 @@ describe('awaitly payment processing', () => {
       onEvent: (event) => events.push(event),
     });
 
-    await workflow(async ({ step, deps }) => {
+    await workflow.run(async ({ step, deps }) => {
       // ... workflow logic
     });
 
@@ -2043,26 +1983,30 @@ describe('awaitly payment processing', () => {
 #### Testing Saga Compensation
 
 ```typescript
-import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/durable';
 
 describe('saga compensation', () => {
   it('should run compensations in LIFO order on failure', async () => {
     const compensationOrder: string[] = [];
 
-    const saga = createSagaWorkflow({
+    const saga = createSagaWorkflow('compensationOrder', {
       step1: () => Promise.resolve(ok({ id: '1' })),
       step2: () => Promise.resolve(ok({ id: '2' })),
       step3: () => Promise.resolve(err(new Error('Step 3 failed'))),
     });
 
-    const result = await saga(async (ctx, deps) => {
-      await ctx.step(() => deps.step1(), {
-        compensate: () => { compensationOrder.push('step1'); },
+    const result = await saga.run(async ({ step, deps }) => {
+      await step('step1', () => deps.step1(), {
+        compensate: () => {
+          compensationOrder.push('step1');
+        },
       });
-      await ctx.step(() => deps.step2(), {
-        compensate: () => { compensationOrder.push('step2'); },
+      await step('step2', () => deps.step2(), {
+        compensate: () => {
+          compensationOrder.push('step2');
+        },
       });
-      await ctx.step(() => deps.step3()); // This fails
+      await step('step3', () => deps.step3()); // This fails
       return 'done';
     });
 
@@ -2072,13 +2016,18 @@ describe('saga compensation', () => {
   });
 
   it('should track compensation failures', async () => {
-    const saga = createSagaWorkflow({ step1: () => ok({}), step2: () => err(new Error('fail')) });
+    const saga = createSagaWorkflow('compensationFailures', {
+      step1: () => ok({}),
+      step2: () => err(new Error('fail')),
+    });
 
-    const result = await saga(async (ctx, deps) => {
-      await ctx.step(() => deps.step1(), {
-        compensate: () => { throw new Error('Compensation failed'); },
+    const result = await saga.run(async ({ step, deps }) => {
+      await step('step1', () => deps.step1(), {
+        compensate: () => {
+          throw new Error('Compensation failed');
+        },
       });
-      await ctx.step(() => deps.step2());
+      await step('step2', () => deps.step2());
       return 'done';
     });
 
@@ -2144,7 +2093,7 @@ describe('durable execution', () => {
 #### Testing Circuit Breaker
 
 ```typescript
-import { createCircuitBreaker, isCircuitOpenError } from 'awaitly/circuit-breaker';
+import { createCircuitBreaker, isCircuitOpenError } from 'awaitly';
 
 describe('circuit breaker', () => {
   it('should open after threshold failures', async () => {
@@ -2190,7 +2139,7 @@ import {
   createHITLOrchestrator,
   createMemoryApprovalStore,
   createMemoryWorkflowStateStore,
-} from 'awaitly/hitl';
+} from 'awaitly/durable';
 
 describe('human-in-the-loop', () => {
   it('should pause workflow at approval step', async () => {
@@ -2328,13 +2277,13 @@ Both Awaitly and Effect provide production-grade reliability features, but with 
 | **Policies** | `servicePolicies` + registry | Via `Schedule` |
 | **Human-in-the-Loop** | `createHITLOrchestrator` (built-in) | Custom implementation required |
 | **Singleflight** | `singleflight()` with TTL caching | Custom implementation required |
-| **Streaming** | `awaitly/streaming` with transformers | Effect Stream (more powerful) |
-| **Functional Utils** | `awaitly/functional` (pipe/flow/R) | Built-in pipe/flow |
-| **HTTP Client** | `awaitly/fetch` (fetchJson, etc.) | HttpClient (more configurable) |
+| **Streaming** | `awaitly/durable` with transformers | Effect Stream (more powerful) |
+| **Result composition** | Root/result combinators | Built-in pipe/flow |
+| **HTTP Client** | Native `fetch` wrapped with `tryAsync` | HttpClient (more configurable) |
 | **Sleep/Duration** | `step.sleep('id', '5s')` | `Effect.sleep(Duration.seconds(5))` |
-| **ESLint Plugin** | `eslint-plugin-awaitly` (8 rules) | `@effect/eslint-plugin` |
+| **ESLint Plugin** | `eslint-plugin-awaitly` v3 (20 rules) | `@effect/eslint-plugin` |
 | **Dependency Injection** | Dependencies object to workflow | Layers and Context |
-| **Structured Concurrency** | Via `step.parallel()` | Built-in with fibers |
+| **Structured Concurrency** | Via `step.all()` | Built-in with fibers |
 | **Observability** | `onEvent` callback | Built-in tracing and metrics |
 | **Bundle Size** | ~8-15KB (tree-shakeable) | ~50KB+ |
 
@@ -2510,7 +2459,7 @@ import {
   createCircuitBreaker,
   circuitBreakerPresets,
   isCircuitOpenError,
-} from 'awaitly/circuit-breaker';
+} from 'awaitly';
 
 // Use presets for common scenarios
 const breaker = createCircuitBreaker('external-api', circuitBreakerPresets.standard);
@@ -2524,7 +2473,7 @@ const customBreaker = createCircuitBreaker('payment-api', {
   onStateChange: (from, to, name) => console.log(`${name}: ${from} -> ${to}`),
 });
 
-const result = await workflow(async ({ step, deps }) => {
+const result = await workflow.run(async ({ step, deps }) => {
   // executeResult returns a Result, integrates cleanly with workflows
   const data = await breaker.executeResult(() =>
     step('callExternalService', () => deps.callExternalService())
@@ -2579,7 +2528,7 @@ const getDataWithFallbackAwaitly = createWorkflow('getDataWithFallback', {
   backupAPI,
 });
 
-const result = await getDataWithFallbackAwaitly(async ({ step, deps }) => {
+const result = await getDataWithFallbackAwaitly.run(async ({ step, deps }) => {
   // Try primary
   const primaryResult = await deps.primaryAPI.getData(id);
   if (primaryResult.ok) return primaryResult.value;
@@ -2657,31 +2606,33 @@ function processOrderWithCompensation(
 }
 
 // Awaitly: Built-in saga pattern with automatic compensation
-import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/saga';
+import { createSagaWorkflow, isSagaCompensationError } from 'awaitly/durable';
 
-const processOrderSaga = createSagaWorkflow({
+const processOrderSaga = createSagaWorkflow('processOrder', {
   processPayment,
+  refundPayment,
   reserveInventory,
+  unreserveInventory,
   scheduleShipping,
 });
 
-const result = await processOrderSaga(async ({ saga, deps }) => {
+const result = await processOrderSaga.run(async ({ step, deps }) => {
   // Step 1: Process payment (with compensation)
-  const payment = await saga.step(
+  const payment = await step(
     'Process payment',
     () => deps.processPayment(order.payment),
-    { compensate: (p) => refundPayment(p.id) } // Runs on rollback
+    { compensate: (p) => deps.refundPayment(p.id) }, // Runs on rollback
   );
 
   // Step 2: Reserve inventory (with compensation)
-  await saga.step(
+  await step(
     'Reserve inventory',
     () => deps.reserveInventory(order.items),
-    { compensate: () => unreserveInventory(order.items) }
+    { compensate: () => deps.unreserveInventory(order.items) },
   );
 
   // Step 3: Schedule shipping (no compensation needed)
-  await saga.step('Schedule shipping', () => deps.scheduleShipping(order));
+  await step('Schedule shipping', () => deps.scheduleShipping(order));
 
   return { success: true, orderId: order.id };
 });
@@ -2754,7 +2705,7 @@ import {
   createRateLimiter,
   createConcurrencyLimiter,
   createCombinedLimiter,
-} from 'awaitly/ratelimit';
+} from 'awaitly';
 
 // Rate limiting: requests per second
 const apiLimiter = createRateLimiter('stripe-api', {
@@ -2777,7 +2728,7 @@ const limiter = createCombinedLimiter('api', {
 });
 
 // Usage
-const result = await workflow(async ({ step, deps }) => {
+const result = await workflow.run(async ({ step, deps }) => {
   // Rate-limited call
   const data = await apiLimiter.execute(() =>
     step('callApi', () => deps.callApi())
@@ -2881,7 +2832,7 @@ A compliance team needed multi-level approval for high-value transactions: manag
 They implemented Awaitly's Human-in-the-Loop orchestration:
 
 ```typescript
-import { createHITLOrchestrator, createApprovalStep } from 'awaitly/hitl';
+import { createHITLOrchestrator, createApprovalStep } from 'awaitly/durable';
 
 const orchestrator = createHITLOrchestrator({
   approvalStore: redisApprovalStore,

@@ -5,10 +5,11 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest -w",
+    "test": "vitest run src --exclude 'src/___temp___/**'",
+    "test:watch": "vitest src -w --exclude 'src/___temp___/**'",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "prepare": "effect-language-service patch"
   },
   "keywords": [
     "typescript",
@@ -20,18 +21,19 @@
   "devDependencies": {
     "@effect/eslint-plugin": "^0.3.2",
     "@eslint/compat": "^2.0.2",
-    "@eslint/eslintrc": "^3.3.3",
+    "@eslint/eslintrc": "^3.3.4",
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.0.0",
-    "eslint-plugin-awaitly": "^0.13.0",
+    "eslint": "^10.7.0",
+    "eslint-plugin-awaitly": "^3.0.0",
     "eslint-plugin-neverthrow": "^1.1.4",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.55.0",
+    "typescript-eslint": "^8.56.1",
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "awaitly": "^1.24.0",
-    "effect": "^3.19.17",
+    "@effect/language-service": "^0.87.0",
+    "awaitly": "^4.2.0",
+    "effect": "4.0.0-beta.100",
     "neverthrow": "^8.2.0",
     "zod": "^4.3.6"
   }

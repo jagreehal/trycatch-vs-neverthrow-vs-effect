@@ -15,16 +15,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ResultAsync } from 'neverthrow';
 import { Effect, Schedule, Duration } from 'effect';
 import {
-  ok,
-  err,
   allAsync,
   tryAsync,
-  isPromiseRejectedError,
   type Result,
   type AsyncResult,
+  createWorkflow,
+  isStepComplete,
   type UnexpectedError,
 } from 'awaitly';
-import { createWorkflow, isStepComplete } from 'awaitly/workflow';
 
 /** Local type for resume state entry (ResumeStateEntry shape when using onEvent) */
 interface SavedStepEntry {
@@ -144,13 +142,15 @@ export async function dataPipelineWorkflow(
     resumeState?: { steps: Map<string, SavedStepEntry> };
   }
 ): AsyncResult<Analytics, FetchError | ProcessError | UnexpectedError> {
+  // Awaitly 4.1: optional options accept `undefined`, so a possibly-undefined
+  // value forwards straight through even with exactOptionalPropertyTypes on.
   const workflow = createWorkflow('dataPipeline', { fetchUser, fetchPosts, fetchComments, processAnalytics }, {
     cache: options?.cache,
     onEvent: options?.onEvent,
     resumeState: options?.resumeState as any,
   });
 
-  return workflow(async ({ step }) => {
+  return workflow.run(async ({ step }) => {
     const user = await step(
       'fetchUser',
       () => fetchUser(userId),
@@ -169,19 +169,10 @@ export async function dataPipelineWorkflow(
       }
     );
 
-    const commentResults = await step.fromResult(
+    const commentResults = await step(
       'fetchComments',
       () => allAsync(posts.map((post: Post) => fetchComments(post.id))),
-      {
-        onError: (error: unknown): FetchError => {
-          // Since fetchComments uses tryAsync, PromiseRejectedError shouldn't occur
-          if (isPromiseRejectedError(error)) {
-            return 'COMMENTS_FETCH_FAILED';
-          }
-          return error as FetchError;
-        },
-        key: `comments:${userId}`,
-      }
+      { key: `comments:${userId}` }
     );
     const allComments = commentResults.flat();
 

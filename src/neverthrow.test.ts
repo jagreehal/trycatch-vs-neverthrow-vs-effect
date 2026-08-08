@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { Result, ResultAsync, ok, err, okAsync, errAsync } from 'neverthrow';
+import { Result, ResultAsync, okAsync, errAsync } from 'neverthrow';
 
 // --- Types / errors
 export type Currency = 'GBP' | 'EUR' | 'USD';

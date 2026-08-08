@@ -14,8 +14,15 @@
 import { describe, it, expect } from 'vitest';
 import { ResultAsync, errAsync, Result, ok as ntOk, err as ntErr } from 'neverthrow';
 import { Effect } from 'effect';
-import { ok, err, allAsync, tryAsync, isPromiseRejectedError, type AsyncResult, type UnexpectedError } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
+import {
+  ok,
+  err,
+  allAsync,
+  tryAsync,
+  createWorkflow,
+  type AsyncResult,
+  type UnexpectedError,
+} from 'awaitly';
 
 // ============================================================================
 // Shared Types & Errors
@@ -210,64 +217,41 @@ export async function checkoutWorkflow(
     createOrder,
   });
 
-  return workflow(async ({ step }) => {
+  return workflow.run('checkout', async ({ step }) => {
     const validatedCart = await step('validateCart', () => validateCart(cart), {
       description: 'Validate cart',
       key: `validate:${cart.userId}`,
     });
 
-    const inventoryChecks = await step.fromResult(
+    const inventoryChecks = await step(
       'checkInventory',
       () => allAsync(
         validatedCart.items.map((item: { productId: string; quantity: number }) =>
           checkInventory(item.productId, item.quantity)
         )
       ),
-      {
-        onError: (error: unknown): InventoryError => {
-          if (isPromiseRejectedError(error)) {
-            return 'OUT_OF_STOCK';
-          }
-          return error as InventoryError;
-        },
-        key: `inventory:${cart.userId}`,
-      }
+      { key: `inventory:${cart.userId}` }
     );
+    void inventoryChecks;
 
-    const pricingChecks = await step.fromResult(
+    const pricingChecks = await step(
       'getPricing',
       () => allAsync(
         validatedCart.items.map((item: { productId: string; quantity: number }) =>
           getPricing(item.productId)
         )
       ),
-      {
-        onError: (error: unknown): PricingError => {
-          if (isPromiseRejectedError(error)) {
-            return 'PRICING_UNAVAILABLE';
-          }
-          return error as PricingError;
-        },
-        key: `pricing:${cart.userId}`,
-      }
+      { key: `pricing:${cart.userId}` }
     );
 
-    await step.fromResult(
+    await step(
       'reserveInventory',
       () => allAsync(
         validatedCart.items.map((item: { productId: string; quantity: number }) =>
           reserveInventory(item.productId, item.quantity)
         )
       ),
-      {
-        onError: (error: unknown): InventoryError => {
-          if (isPromiseRejectedError(error)) {
-            return 'OUT_OF_STOCK';
-          }
-          return error as InventoryError;
-        },
-        key: `reserve:${cart.userId}`,
-      }
+      { key: `reserve:${cart.userId}` }
     );
 
     const total = pricingChecks.reduce((sum: number, price: Price, i: number) => {
@@ -455,6 +439,7 @@ export const checkoutEffect = (
         getPricingEffect(item.productId)
       ), { concurrency: 'unbounded' }),
     ], { concurrency: 'unbounded' });
+    void inventories;
 
     yield* Effect.all(
       validatedCart.items.map(item =>
@@ -643,8 +628,8 @@ describe('E-commerce Checkout', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('EMPTY_CART');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('EMPTY_CART');
       }
     });
 
@@ -657,8 +642,8 @@ describe('E-commerce Checkout', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('OUT_OF_STOCK');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('OUT_OF_STOCK');
       }
     });
 
@@ -671,8 +656,8 @@ describe('E-commerce Checkout', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('INSUFFICIENT_QUANTITY');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('INSUFFICIENT_QUANTITY');
       }
     });
 
@@ -685,8 +670,8 @@ describe('E-commerce Checkout', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('PAYMENT_DECLINED');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('PAYMENT_DECLINED');
       }
     });
   });

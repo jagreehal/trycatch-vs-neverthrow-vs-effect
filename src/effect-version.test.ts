@@ -62,8 +62,8 @@ export interface Provider {
 }
 
 // Service tags (DI via Layer)
-export const DbService = Context.GenericTag<Db>('DbService');
-export const ProviderService = Context.GenericTag<Provider>('ProviderService');
+export const DbService = Context.Service<Db>('DbService');
+export const ProviderService = Context.Service<Provider>('ProviderService');
 
 // Schema (using zod here for brevity)
 const CreatePayment = z.object({
@@ -75,20 +75,22 @@ const CreatePayment = z.object({
 });
 type CreatePayment = z.infer<typeof CreatePayment>;
 
-const mapHttpError = (status: number, body?: unknown): Error => {
+const mapHttpError = (
+  status: number,
+  body?: unknown,
+): ProviderSoftFail | ProviderHardFail | ProviderUnavailable => {
   if (status === 429 || status >= 500)
     return new ProviderSoftFail(`Provider ${status}`);
   if (status >= 400)
     return new ProviderHardFail(`Provider ${status}: ${JSON.stringify(body)}`);
-  return new Error('Unknown provider error');
+  return new ProviderUnavailable('Unknown provider error');
 };
 
 
 // Exponential backoff + jitter, capped (retry max 3 attempts total)
 const retrySchedule = Schedule.exponential(Duration.millis(200)).pipe(
   Schedule.jittered,
-  Schedule.upTo(Duration.seconds(3)),
-  Schedule.intersect(Schedule.recurs(2))
+  Schedule.upTo({ duration: Duration.seconds(3), times: 2 })
 );
 
 // --- Use case
@@ -129,23 +131,20 @@ const callProvider = (input: CreatePayment) =>
       catch: (e: any) => {
         if (typeof e?.status === 'number')
           return mapHttpError(e.status, e.body);
-        return e as Error;
+        return new ProviderUnavailable(String(e));
       },
     });
 
     return yield* call.pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: 2000,
-        onTimeout: () => new TimeoutError(`Timed out after 2000ms`),
+        orElse: () => Effect.fail(new TimeoutError(`Timed out after 2000ms`)),
       }),
-      Effect.retry(
-        retrySchedule.pipe(
-          Schedule.whileInput(
-            (err: unknown) =>
-              err instanceof TimeoutError || err instanceof ProviderSoftFail
-          )
-        )
-      )
+      Effect.retry({
+        schedule: retrySchedule,
+        while: (err: unknown) =>
+          err instanceof TimeoutError || err instanceof ProviderSoftFail,
+      })
     );
   });
 
@@ -221,7 +220,7 @@ export const createPaymentEffect = (raw: unknown, actorEmail: string) =>
     
     // Call provider with error recovery
     const response = yield* callProvider(lockedInput).pipe(
-      Effect.catchAll((error) => {
+      Effect.catch((error) => {
         if (error instanceof TimeoutError || error instanceof ProviderSoftFail) {
           return persistFailure(lockedInput, error, actorEmail);
         }
@@ -304,9 +303,9 @@ describe('effect', () => {
     );
     expect(exit._tag).toBe('Failure');
     if (exit._tag === 'Failure') {
-      expect(exit.cause._tag).toBe('Fail');
-      if (exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBeInstanceOf(ValidationError);
+      expect(exit.cause.reasons[0]?._tag).toBe('Fail');
+      if (exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBeInstanceOf(ValidationError);
       }
     }
   });
@@ -329,9 +328,9 @@ describe('effect', () => {
     );
     expect(exit._tag).toBe('Failure');
     if (exit._tag === 'Failure') {
-      expect(exit.cause._tag).toBe('Fail');
-      if (exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBeInstanceOf(IdempotencyConflict);
+      expect(exit.cause.reasons[0]?._tag).toBe('Fail');
+      if (exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBeInstanceOf(IdempotencyConflict);
       }
     }
   });
@@ -361,9 +360,9 @@ describe('effect', () => {
     );
     expect(exit._tag).toBe('Failure');
     if (exit._tag === 'Failure') {
-      expect(exit.cause._tag).toBe('Fail');
-      if (exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBeInstanceOf(ProviderHardFail);
+      expect(exit.cause.reasons[0]?._tag).toBe('Fail');
+      if (exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBeInstanceOf(ProviderHardFail);
       }
     }
   });
@@ -392,9 +391,9 @@ describe('effect', () => {
     );
     expect(exit._tag).toBe('Failure');
     if (exit._tag === 'Failure') {
-      expect(exit.cause._tag).toBe('Fail');
-      if (exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBeInstanceOf(ProviderUnavailable);
+      expect(exit.cause.reasons[0]?._tag).toBe('Fail');
+      if (exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBeInstanceOf(ProviderUnavailable);
       }
     }
   });

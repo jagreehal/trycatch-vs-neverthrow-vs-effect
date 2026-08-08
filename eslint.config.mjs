@@ -1,4 +1,4 @@
-// ESLint 9 flat config with TypeScript, neverthrow, and Effect
+// ESLint 9 flat config with TypeScript, neverthrow, awaitly, and Effect
 // Uses FlatCompat to consume legacy "plugin:.../recommended" shareable configs
 
 import js from '@eslint/js';
@@ -7,22 +7,6 @@ import { fixupPluginRules } from '@eslint/compat';
 import effectPlugin from '@effect/eslint-plugin';
 import neverthrowPlugin from 'eslint-plugin-neverthrow';
 import awaitlyPlugin from 'eslint-plugin-awaitly';
-// Ensure Effect rules apply only to TS files as well
-const effectRecommended = effectPlugin?.configs?.recommended
-  ? [
-      {
-        ...effectPlugin.configs.recommended,
-        files: ['**/*.ts', '**/*.tsx'],
-        languageOptions: {
-          parser: tseslint.parser,
-          parserOptions: {
-            project: true,
-            tsconfigRootDir: import.meta.dirname,
-          },
-        },
-      },
-    ]
-  : [];
 
 export default [
   // Ignore build output, deps, and the ESLint config itself
@@ -84,22 +68,32 @@ export default [
     plugins: { awaitly: fixupPluginRules(awaitlyPlugin) },
     rules: {
       // Prevents step(fn()) - must be step(() => fn())
-      'awaitly/no-immediate-execution': 'error',
+      'awaitly/step-no-immediate-execution': 'error',
       // Requires thunk when using key option
-      'awaitly/require-thunk-for-key': 'error',
+      'awaitly/step-require-thunk-for-key': 'error',
       // Warns about dynamic cache keys
-      'awaitly/stable-cache-keys': 'warn',
+      'awaitly/step-stable-cache-keys': 'warn',
       // Ensures workflows are awaited
-      'awaitly/no-floating-workflow': 'error',
+      'awaitly/workflow-no-floating': 'error',
       // Ensures Results are handled
-      'awaitly/no-floating-result': 'error',
+      'awaitly/result-no-floating': 'error',
       // Enforces .ok checks before accessing value
-      'awaitly/require-result-handling': 'warn',
+      'awaitly/result-require-handling': 'warn',
       // Prevents options on executor instead of step
-      'awaitly/no-options-on-executor': 'error',
+      'awaitly/workflow-options-position': 'error',
       // Prevents ok(ok(...)) double wrapping
-      'awaitly/no-double-wrap-result': 'error',
+      'awaitly/result-no-double-wrap': 'error',
     },
   },
-  ...effectRecommended,
+  // Effect.ts plugin: no barrel imports (prefer "effect/Effect" over "effect")
+  {
+    files: ['**/*.ts', '**/*.tsx'],
+    ignores: ['**/*.test.ts', '**/*.test.tsx', 'test/**/*'],
+    plugins: { '@effect': fixupPluginRules(effectPlugin) },
+    rules: {
+      '@effect/no-import-from-barrel-package': 'warn',
+      // Optional: enable @effect/dprint for Effect's formatter (can conflict with Prettier)
+      // '@effect/dprint': 'error',
+    },
+  },
 ];
