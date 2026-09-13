@@ -1,6 +1,6 @@
 # Using Awaitly With Your Existing Stack
 
-Awaitly isn't a platform you adopt; it's **type-safe glue** for your existing tools.
+Awaitly works as **type-safe glue** for the tools you already use, so you keep your stack and add typed errors to it.
 
 Unlike Effect's "adopt the ecosystem" approach, Awaitly enhances the libraries you already use. Add it to one function, one module, one feature at a time.
 
@@ -10,15 +10,25 @@ Unlike Effect's "adopt the ecosystem" approach, Awaitly enhances the libraries y
 - **Zod** validation errors become typed Results
 - **Prisma** database errors get exhaustive handling
 - **React Query** works with Result types out of the box
-- **neverthrow** users can migrate gradually
+- **neverthrow** users can migrate one module at a time
 
-**Incremental adoption.** Start with one function:
+**Incremental adoption.** Start with one function. Workflows are optional glue, not a prerequisite.
+
 ```typescript
 // Before: Zod throws on invalid input
-const user = UserSchema.parse(input); // 💥 throws ZodError
+const user = UserSchema.parse(input);
 
-// After: Zod returns a Result you can compose
-const user = await step('validateUser', () => zodToResult(UserSchema, input)); // ✅ typed error handling
+// After Level 1: Zod returns a Result
+const validated = zodToResult(UserSchema, input);
+if (!validated.ok) {
+  return validated; // typed ValidationError
+}
+const user = validated.value;
+
+// After (optional): same Result, composed with run(deps, fn)
+const result = await run({ zodToResult }, async (s) => {
+  return s.zodToResult(UserSchema, input);
+});
 ```
 
 **No lock-in.** Your functions return standard `Result` types that work anywhere.
@@ -64,17 +74,30 @@ const libraryToResultAsync = async <T, E>(
 };
 ```
 
-Then use it in workflows:
+Use Results on their own, or wrap them in `run()` for multi-step flows:
 
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, type Result } from 'awaitly';
 
-const result = await run(async ({ step }) => {
-  const validated = await step('validate', () => zodToResult(Schema, input));
-  const saved = await step('createUser', () => prismaToResult(() => db.user.create({ data: validated })));
-  return saved;
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+const validated = zodToResult(Schema, input);
+if (!validated.ok) return validated;
+
+const saved = await prismaToResult(() => db.user.create({ data: validated.value }));
+return saved;
+```
+
+Optional composition with `run(deps, fn)`:
+
+```typescript
+import { run } from 'awaitly';
+
+const validate = () => zodToResult(Schema, input);
+const createUser = () => prismaToResult(() => db.user.create({ data: input }));
+
+const result = await run({ validate, createUser }, async (s) => {
+  const validated = await s.validate();
+  return s.createUser();
+});
 ```
 
 ## Why This Approach Works
@@ -92,41 +115,38 @@ async function createUser(data: unknown): AsyncResult<User, ValidationError | Db
 
 **2. Composable across libraries**
 
-Mix and match integrations in a single workflow:
+Mix and match integrations in a single `run(deps, fn)`:
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 
-const result = await run(async ({ step }) => {
-  // Zod validation
-  const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawData));
+const validateInput = () => zodToResult(CreateUserSchema, rawData);
+const createUser = (input: CreateUserInput) =>
+  prismaToResult(() => db.user.create({ data: input }));
+const fetchWelcome = (userId: string) => fetchJson(`/api/welcome/${userId}`);
 
-  // Prisma database operation
-  const user = await step('createUser', () => prismaToResult(() =>
-    db.user.create({ data: input })
-  ));
-
-  // HTTP call with typed errors
-  const welcome = await step('fetchWelcome', () => fetchJson(`/api/welcome/${user.id}`));
-
-  return { user, welcome };
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+const result = await run(
+  { validateInput, createUser, fetchWelcome },
+  async (s) => {
+    const input = await s.validateInput();
+    const user = await s.createUser(input);
+    const welcome = await s.fetchWelcome(user.id);
+    return { user, welcome };
+  },
+);
 ```
 
 **3. Gradual adoption**
 
 Add Awaitly to new code while keeping existing code unchanged:
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 
 // Existing code: still works
 const oldFeature = await legacyFunction();
 
-// New code: uses Result types
-const newFeature = await run(async ({ step }) => {
-  return await step('modern', () => modernFunction());
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+// New code: uses Result types via run(deps, fn)
+const modern = () => modernFunction();
+const newFeature = await run({ modern }, async (s) => s.modern());
 ```
 
 ## Common Utilities
@@ -179,6 +199,6 @@ export const fromNullable = <T, E>(
 ## Next Steps
 
 1. **Start with Zod**: Most projects have validation. [See the Zod guide →](./zod.md)
-2. **Add Prisma patterns**: If you use Prisma, typed database errors are a game-changer. [See the Prisma guide →](./prisma.md)
+2. **Add Prisma patterns**: If you use Prisma, typed database errors turn a `catch (e)` into an exhaustive switch. [See the Prisma guide →](./prisma.md)
 3. **Connect to React Query**: Server state with Result types. [See the React Query guide →](./react-query.md)
 4. **Migrating from neverthrow?**: Gradual path with interop utilities. [See the migration guide →](./neverthrow-migration.md)

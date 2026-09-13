@@ -13,8 +13,12 @@
 import { describe, it, expect } from 'vitest';
 import { ResultAsync, okAsync } from 'neverthrow';
 import { Effect } from 'effect';
-import { ok, err, allAsync, tryAsync, type AsyncResult, type UnexpectedError } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
+import {
+  tryAsync,
+  createWorkflow,
+  type AsyncResult,
+  type UnexpectedError,
+} from 'awaitly';
 
 // ============================================================================
 // Shared Types
@@ -128,9 +132,9 @@ const fetchTenant = (tenantId: TenantId): AsyncResult<Tenant, TenantError> =>
     async () => await fetchTenantImpl(tenantId),
     (e) => {
       if (e instanceof Error && e.message === 'TENANT_NOT_FOUND') {
-        return 'TENANT_NOT_FOUND' as TenantError;
+        return 'TENANT_NOT_FOUND';
       }
-      return 'TENANT_NOT_FOUND' as TenantError;
+      return 'TENANT_NOT_FOUND';
     }
   );
 
@@ -145,9 +149,9 @@ const fetchResources = (tenantId: TenantId): AsyncResult<Resource[], ResourceErr
     async () => await fetchResourcesImpl(tenantId),
     (e) => {
       if (e instanceof Error && e.message === 'RESOURCE_LIMIT_EXCEEDED') {
-        return 'RESOURCE_LIMIT_EXCEEDED' as ResourceError;
+        return 'RESOURCE_LIMIT_EXCEEDED';
       }
-      return 'RESOURCE_FETCH_FAILED' as ResourceError;
+      return 'RESOURCE_FETCH_FAILED';
     }
   );
 
@@ -181,21 +185,21 @@ export async function multiTenantWorkflow(
     sendBillingNotification,
   });
 
-  return workflow(async ({ step }) => {
-    const tenant = await step('fetchTenant', () => fetchTenant(tenantId), {
+  return workflow.run(async ({ step, deps }) => {
+    const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId), {
       description: 'Fetch tenant',
       key: `tenant:${tenantId}`,
     });
 
     if (tenant.plan !== 'free') {
-      const { users, resources } = await step.parallel('Fetch tenant data', {
-        users: () => fetchUsers(tenantId),
-        resources: () => fetchResources(tenantId),
+      const { users, resources } = await step.all('Fetch tenant data', {
+        users: () => deps.fetchUsers(tenantId),
+        resources: () => deps.fetchResources(tenantId),
       });
 
       const usage = await step(
         'calculateUsage',
-        () => calculateUsage(tenant, users, resources),
+        () => deps.calculateUsage(tenant, users, resources),
         {
           description: 'Calculate usage',
           key: `usage:${tenantId}`,
@@ -204,13 +208,13 @@ export async function multiTenantWorkflow(
 
       switch (tenant.plan) {
         case 'pro':
-          await step('sendBillingNotification', () => sendBillingNotification(tenant, usage), {
+          await step('sendBillingNotification', () => deps.sendBillingNotification(tenant, usage), {
             description: 'Send pro billing notification',
             key: `notify:${tenantId}:pro`,
           });
           break;
         case 'enterprise':
-          await step('sendBillingNotification', () => sendBillingNotification(tenant, usage), {
+          await step('sendBillingNotification', () => deps.sendBillingNotification(tenant, usage), {
             description: 'Send enterprise billing notification',
             key: `notify:${tenantId}:enterprise`,
           });
@@ -223,7 +227,7 @@ export async function multiTenantWorkflow(
     } else {
       const usage = await step(
         'calculateUsageFree',
-        () => calculateUsage(tenant, [], []),
+        () => deps.calculateUsage(tenant, [], []),
         {
           description: 'Calculate usage (free plan)',
           key: `usage:${tenantId}:free`,
@@ -492,8 +496,8 @@ describe('Multi-Tenant Workflow', () => {
       const exit = await Effect.runPromiseExit(multiTenantEffect('missing'));
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('TENANT_NOT_FOUND');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('TENANT_NOT_FOUND');
       }
     });
 
@@ -501,8 +505,8 @@ describe('Multi-Tenant Workflow', () => {
       const exit = await Effect.runPromiseExit(multiTenantEffect('limit-exceeded'));
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('RESOURCE_LIMIT_EXCEEDED');
+      if (exit._tag === 'Failure' && exit.cause.reasons[0]?._tag === 'Fail') {
+        expect(exit.cause.reasons[0].error).toBe('RESOURCE_LIMIT_EXCEEDED');
       }
     });
   });

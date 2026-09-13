@@ -13,22 +13,20 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ResultAsync } from 'neverthrow';
-import { Effect, Schedule, Duration } from 'effect';
+import { Effect, Schedule, Duration, Cause } from 'effect';
 import {
-  ok,
-  err,
   allAsync,
   tryAsync,
-  isPromiseRejectedError,
   type Result,
   type AsyncResult,
+  createWorkflow,
+  isStepComplete,
   type UnexpectedError,
 } from 'awaitly';
-import { createWorkflow, isStepComplete } from 'awaitly/workflow';
 
 /** Local type for resume state entry (ResumeStateEntry shape when using onEvent) */
 interface SavedStepEntry {
-  result: Result<unknown, unknown, unknown>;
+  result: Result<unknown, unknown>;
   meta?: unknown;
 }
 
@@ -144,16 +142,18 @@ export async function dataPipelineWorkflow(
     resumeState?: { steps: Map<string, SavedStepEntry> };
   }
 ): AsyncResult<Analytics, FetchError | ProcessError | UnexpectedError> {
+  // Awaitly 4.1: optional options accept `undefined`, so a possibly-undefined
+  // value forwards straight through even with exactOptionalPropertyTypes on.
   const workflow = createWorkflow('dataPipeline', { fetchUser, fetchPosts, fetchComments, processAnalytics }, {
     cache: options?.cache,
     onEvent: options?.onEvent,
     resumeState: options?.resumeState as any,
   });
 
-  return workflow(async ({ step }) => {
+  return workflow.run(async ({ step, deps }) => {
     const user = await step(
       'fetchUser',
-      () => fetchUser(userId),
+      () => deps.fetchUser(userId),
       {
         description: 'Fetch user',
         key: `user:${userId}`,
@@ -162,32 +162,23 @@ export async function dataPipelineWorkflow(
 
     const posts = await step(
       'fetchPosts',
-      () => fetchPosts(userId),
+      () => deps.fetchPosts(userId),
       {
         description: 'Fetch posts',
         key: `posts:${userId}`,
       }
     );
 
-    const commentResults = await step.fromResult(
+    const commentResults = await step(
       'fetchComments',
-      () => allAsync(posts.map((post: Post) => fetchComments(post.id))),
-      {
-        onError: (error: unknown): FetchError => {
-          // Since fetchComments uses tryAsync, PromiseRejectedError shouldn't occur
-          if (isPromiseRejectedError(error)) {
-            return 'COMMENTS_FETCH_FAILED';
-          }
-          return error as FetchError;
-        },
-        key: `comments:${userId}`,
-      }
+      () => allAsync(posts.map((post: Post) => deps.fetchComments(post.id))),
+      { key: `comments:${userId}` }
     );
     const allComments = commentResults.flat();
 
     const analytics = await step(
       'processAnalytics',
-      () => processAnalytics(user, posts, allComments),
+      () => deps.processAnalytics(user, posts, allComments),
       {
         description: 'Process analytics',
         key: `analytics:${userId}`,
@@ -246,10 +237,11 @@ export function dataPipelineNeverthrow(
 // Effect Implementation
 // ============================================================================
 
-const retryPolicy = Schedule.exponential(Duration.millis(50)).pipe(
+// Effect 4: `Schedule.intersect` is gone. Bounding the attempt count moved to
+// `Effect.retry`'s `times` option, so the schedule only describes the delay.
+const retrySchedule = Schedule.exponential(Duration.millis(50)).pipe(
   Schedule.jittered,
-  Schedule.upTo(Duration.seconds(1)),
-  Schedule.intersect(Schedule.recurs(2))
+  Schedule.upTo({ duration: Duration.seconds(1) })
 );
 
 const fetchUserEffect = (userId: UserId): Effect.Effect<User, FetchError> =>
@@ -263,15 +255,15 @@ const fetchPostsEffect = (userId: UserId): Effect.Effect<Post[], FetchError> =>
     try: () => fetchPostsImpl(userId),
     catch: () => 'POSTS_FETCH_FAILED' as const,
   }).pipe(
-    Effect.timeoutFail({
-      duration: 200,
-      onTimeout: () => 'POSTS_FETCH_FAILED' as const,
-    }),
-    Effect.retry(
-      retryPolicy.pipe(
-        Schedule.whileInput((error: FetchError) => error === 'POSTS_FETCH_FAILED')
-      )
-    )
+    Effect.timeout(Duration.millis(200)),
+    // Effect 4: `timeoutFail` is gone; `timeout` fails with a TimeoutError,
+    // which is mapped back to the domain error the caller already expects.
+    Effect.mapError(() => 'POSTS_FETCH_FAILED' as const),
+    Effect.retry({
+      schedule: retrySchedule,
+      times: 2,
+      while: (error) => error === 'POSTS_FETCH_FAILED',
+    })
   );
 
 const fetchCommentsEffect = (postId: string): Effect.Effect<Comment[], FetchError> =>
@@ -279,15 +271,15 @@ const fetchCommentsEffect = (postId: string): Effect.Effect<Comment[], FetchErro
     try: () => fetchCommentsImpl(postId),
     catch: () => 'COMMENTS_FETCH_FAILED' as const,
   }).pipe(
-    Effect.timeoutFail({
-      duration: 200,
-      onTimeout: () => 'COMMENTS_FETCH_FAILED' as const,
-    }),
-    Effect.retry(
-      retryPolicy.pipe(
-        Schedule.whileInput((error: FetchError) => error === 'COMMENTS_FETCH_FAILED')
-      )
-    )
+    Effect.timeout(Duration.millis(200)),
+    // Effect 4: `timeoutFail` is gone; `timeout` fails with a TimeoutError,
+    // which is mapped back to the domain error the caller already expects.
+    Effect.mapError(() => 'COMMENTS_FETCH_FAILED' as const),
+    Effect.retry({
+      schedule: retrySchedule,
+      times: 2,
+      while: (error) => error === 'COMMENTS_FETCH_FAILED',
+    })
   );
 
 const processAnalyticsEffect = (
@@ -299,23 +291,24 @@ const processAnalyticsEffect = (
     try: () => processAnalyticsImpl(user, posts, allComments),
     catch: () => 'ANALYTICS_FAILED' as const,
   }).pipe(
-    Effect.timeoutFail({
-      duration: 150,
-      onTimeout: () => 'ANALYTICS_FAILED' as const,
-    }),
-    Effect.retry(
-      retryPolicy.pipe(
-        Schedule.whileInput((error: ProcessError) => error === 'ANALYTICS_FAILED')
-      )
-    )
+    Effect.timeout(Duration.millis(150)),
+    // Effect 4: `timeoutFail` is gone; `timeout` fails with a TimeoutError,
+    // which is mapped back to the domain error the caller already expects.
+    Effect.mapError(() => 'ANALYTICS_FAILED' as const),
+    Effect.retry({
+      schedule: retrySchedule,
+      times: 2,
+      while: (error) => error === 'ANALYTICS_FAILED',
+    })
   );
 
 export const dataPipelineEffect = (userId: UserId): Effect.Effect<Analytics, FetchError | ProcessError> =>
   Effect.gen(function* () {
     const user = yield* fetchUserEffect(userId);
     const posts = yield* fetchPostsEffect(userId);
-    const commentArrays = yield* Effect.all(
-      posts.map(post => fetchCommentsEffect(post.id)),
+    const commentArrays = yield* Effect.forEach(
+      posts,
+      post => fetchCommentsEffect(post.id),
       { concurrency: 'unbounded' }
     );
     const allComments = commentArrays.flat();
@@ -458,10 +451,10 @@ describe('Data Pipeline', () => {
 
       expect(exit._tag).toBe('Failure');
       if (exit._tag === 'Failure') {
-        expect(exit.cause._tag).toBe('Fail');
-        if (exit.cause._tag === 'Fail') {
-          expect(['USER_NOT_FOUND', 'POSTS_FETCH_FAILED', 'COMMENTS_FETCH_FAILED', 'ANALYTICS_FAILED']).toContain(exit.cause.error);
-        }
+        // Effect 4: a Cause holds a list of failures rather than exposing
+        // `_tag`/`error` directly. `Cause.squash` returns the failure value.
+        expect(Cause.hasFails(exit.cause)).toBe(true);
+        expect(['USER_NOT_FOUND', 'POSTS_FETCH_FAILED', 'COMMENTS_FETCH_FAILED', 'ANALYTICS_FAILED']).toContain(Cause.squash(exit.cause));
       }
     });
 

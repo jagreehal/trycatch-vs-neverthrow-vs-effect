@@ -89,7 +89,7 @@ const processLines = Stream.fromAsyncIterable(
       return validated;
     })
   ),
-  Stream.catchAll((error) =>
+  Stream.catch((error) =>
     Stream.succeed({ error, skipped: true })
   ),
   Stream.grouped(100), // Batch into chunks of 100
@@ -117,58 +117,56 @@ await Effect.runPromise(
 - Heavy bundle size
 - May be overkill for simple use cases
 
-### 3. Awaitly Streaming (v1.11.0)
+### 3. Awaitly Streaming (Awaitly 4)
 
-`awaitly/streaming` provides Result-aware stream transformers with familiar APIs:
+*This scenario uses `awaitly/durable` with durable workflows for backpressure and resume. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+
+`awaitly/durable` provides Result-aware stream transformers with familiar APIs:
 
 ```typescript
+import { createWorkflow } from 'awaitly';
 import {
   createMemoryStreamStore,
-  createFileStreamStore,
+  pipe,
   map,
   filter,
-  flatMap,
   chunk,
-  take,
-  skip,
-  collect,
-  reduce,
-} from 'awaitly/streaming';
-import { durable } from 'awaitly/durable';
+} from 'awaitly/durable';
 
-const store = createMemoryStreamStore<string>();
+// The stream store is a workflow option; step.getReadable/getWritable read it
+const streamStore = createMemoryStreamStore();
 
-const result = await durable.run(
-  { parseLine, validateLine, saveBatch },
-  async ({ step, deps }) => {
-    // Get readable stream
-    const readable = await step.getReadable(store, { key: 'input' });
+const job = createWorkflow('streamJob', { parseLine, validateLine, saveBatch }, {
+  streamStore,
+});
 
-    // Transform pipeline (Result-aware)
-    const processed = readable
-      .pipeThrough(map((line) => deps.parseLine(line)))
-      .pipeThrough(filter((result) => result.ok))
-      .pipeThrough(map((result) => deps.validateLine(result.value)))
-      .pipeThrough(filter((result) => result.ok))
-      .pipeThrough(chunk(100)); // Batch for efficient writes
+const result = await job.run(async ({ step, deps }) => {
+  const reader = step.getReadable<string>({ namespace: 'input' });
 
-    // Process batches with automatic backpressure
-    let totalProcessed = 0;
-    for await (const batch of processed) {
-      const saved = await step('saveBatch', () => deps.saveBatch(batch), {
-        key: `batch:${totalProcessed}`,
-      });
-      totalProcessed += batch.length;
-    }
+  // Transformers are data-first functions over an AsyncIterable, composed with
+  // pipe() takes async iterables, not Web Streams TransformStreams
+  const batches = pipe(
+    reader,
+    (s) => map(s, (line) => line.trim()),
+    (s) => filter(s, (line) => line.length > 0),
+    (s) => chunk(s, 100) // Batch for efficient writes
+  );
 
-    return { totalProcessed };
-  },
-  { id: `stream-job-${jobId}`, store: persistenceStore }
-);
+  // Consume with for-await; backpressure comes from the reader's highWaterMark
+  let totalProcessed = 0;
+  for await (const batch of batches) {
+    await step('saveBatch', () => deps.saveBatch(batch), {
+      key: `batch:${totalProcessed}`,
+    });
+    totalProcessed += batch.length;
+  }
+
+  return { totalProcessed };
+});
 ```
 
 **Pros:**
-- Familiar Web Streams API
+- Plain async iterables, so `for await` works with no TransformStream plumbing
 - Result-aware transformers
 - Automatic backpressure
 - Integrates with workflow caching/resume
@@ -179,42 +177,79 @@ const result = await durable.run(
 - Newer API, less battle-tested
 - Limited stream merging/splitting
 
+**What the analyzer sees.** `awaitly-analyze src/comparison/streaming.test.ts` draws `streamProcess` as two `for...of` loops, one per stage, with the error each step can raise:
+
+```mermaid
+flowchart TB
+
+  start((Start))
+  loop_start_1(["for-of: lines"])
+  step_3["processLine"]
+  err_step_3_PROCESS_ERROR["PROCESS_ERROR"]
+  loop_end_2(["Continue?"])
+  loop_start_4(["for-of: chunks"])
+  step_6["saveBatch"]
+  err_step_6_SAVE_ERROR["SAVE_ERROR"]
+  loop_end_5(["Continue?"])
+  end_node((End))
+
+  step_3 -->|PROCESS_ERROR| err_step_3_PROCESS_ERROR
+  loop_start_1 -->|iterate| step_3
+  step_3 --> loop_end_2
+  loop_end_2 -->|next| loop_start_1
+  step_6 -->|SAVE_ERROR| err_step_6_SAVE_ERROR
+  loop_start_4 -->|iterate| step_6
+  step_6 --> loop_end_5
+  loop_end_5 -->|next| loop_start_4
+  loop_end_2 --> loop_start_4
+  start --> loop_start_1
+  loop_end_5 --> end_node
+```
+
 ## Transformer Reference
+
+Every transformer is data-first: it takes the source (a `StreamReader` or any `AsyncIterable`) as its first argument and returns an `AsyncIterable`, so `pipe(source, ...stages)` composes them and `for await` consumes them.
 
 | Transformer | Description | Example |
 |-------------|-------------|---------|
-| `map(fn)` | Transform each item | `map((x) => ok(x * 2))` |
-| `filter(predicate)` | Keep items matching predicate | `filter((x) => x > 0)` |
-| `flatMap(fn)` | One-to-many transformation | `flatMap((x) => ok(x.split(',')))` |
-| `chunk(size)` | Batch items into arrays | `chunk(100)` |
-| `take(n)` | Limit to first n items | `take(1000)` |
-| `skip(n)` | Skip first n items | `skip(10)` |
-| `collect` | Gather all items into array | `await step('collect', () => collect(stream))` |
-| `reduce(fn, init)` | Reduce to single value | `reduce((acc, x) => acc + x, 0)` |
+| `map(source, fn)` | Transform each item | `map(s, (x) => x * 2)` |
+| `filter(source, predicate)` | Keep items matching predicate | `filter(s, (x) => x > 0)` |
+| `flatMap(source, fn)` | One-to-many transformation | `flatMap(s, (x) => x.split(','))` |
+| `mapAsync(source, fn)` | Async transform, yields `Result` per item | `mapAsync(s, enrich)` |
+| `chunk(source, size)` | Batch items into arrays | `chunk(s, 100)` |
+| `take(source, n)` / `skip(source, n)` | Limit or skip items | `take(s, 1000)` |
+| `takeWhile` / `skipWhile` | Limit or skip by predicate | `takeWhile(s, (x) => x.ok)` |
+| `collect(source)` | Gather all items into an array (`Promise<T[]>`) | `await collect(processed)` |
+| `reduce(source, fn, init)` | Reduce to a single value | `reduce(s, (acc, x) => acc + x, 0)` |
+| `pipe(source, ...stages)` | Compose the stages above | see example |
+
+`collect` and `reduce` return plain promises, not Results: they are terminal consumers of an async iterable, and returning a Result would make every caller unwrap one to get an array.
+
+You do not lose typed errors by that choice. Since Awaitly 4.1 the workflow boundary sorts the two failure modes. A stream failure (`STREAM_READ_ERROR` and friends) arrives as a typed value the way `STEP_TIMEOUT` does, while a throw from your own transform callback stays an `UnexpectedError` with the original on `.cause`. Declare it (`errors: ['STREAM_READ_ERROR']`) to put it in the static union; wrap with `step.try` only when you want your own callback throws typed too.
 
 ## Backpressure Handling
 
 ```typescript
-import { createBackpressuredWriter } from 'awaitly/streaming';
+import { createBackpressureController, shouldApplyBackpressure } from 'awaitly/durable';
 
-const writer = createBackpressuredWriter(writable, {
+const controller = createBackpressureController({
   highWaterMark: 1000,
-  onBackpressure: () => metrics.increment('backpressure'),
-  onDrain: () => metrics.increment('drain'),
+  onStateChange: (state) => metrics.increment(`backpressure.${state}`),
 });
 
-// Automatically pauses when buffer is full
 for (const item of hugeDataset) {
-  await writer.write(item);
+  if (shouldApplyBackpressure(controller)) {
+    await controller.waitForDrain();
+  }
+  await writable.write(item);
 }
-await writer.close();
 ```
 
 ## Comparison Table
 
 | Feature | Manual | Effect Stream | Awaitly Streaming |
 |---------|--------|---------------|-------------------|
-| **API Style** | Custom | Functional operators | Web Streams + helpers |
+| **API Style** | Custom | Functional operators | Data-first fns over async iterables |
 | **Learning Curve** | High (custom impl) | High (Effect) | Low (familiar APIs) |
 | **Backpressure** | Manual | Automatic | Automatic |
 | **Error Handling** | Manual | Effect errors | Result types |
@@ -227,9 +262,9 @@ await writer.close();
 ## Conclusion
 
 For **Streaming Data Processing**:
-- **Awaitly Streaming** is ideal for common use cases: log processing, CSV imports, event streams. Familiar APIs, Result-aware, integrates with workflow resume.
-- **Effect Stream** is more powerful for complex scenarios: windowing, stream merging, sophisticated backpressure. Worth it if you're already using Effect.
-- **Manual Implementation** is only recommended if you have very specific requirements that neither library covers.
+- **Awaitly Streaming** is ideal for common use cases: log processing, CSV imports, event streams. Plain async iterables, Result-aware, integrates with workflow resume.
+- **Effect Stream** covers harder scenarios: windowing, stream merging, tunable backpressure. Worth it if you already run Effect.
+- **Manual Implementation** makes sense when you have a requirement neither library covers.
 
 ### Honest Assessment
 
@@ -237,10 +272,10 @@ For **Streaming Data Processing**:
 - Much simpler than Effect for common streaming patterns
 - Result-aware transformers eliminate manual error checking
 - Web Streams API is already familiar to many developers
-- Workflow integration means streams can be resumed
+- Workflow integration means a stream can resume
 
 **Awaitly Streaming Limitations:**
 - No windowing (time-based or count-based with overlap)
-- No sophisticated backpressure strategies (just high-water mark)
+- One backpressure strategy (high-water mark)
 - No stream merging/splitting operators
 - Less mature than Effect Stream

@@ -1,2 +1,7 @@
 node_modules
 dist
+.DS_Store
+**/___temp___/**
+.pnpm-store
+*.workflow.md
+*.effect-analysis.md

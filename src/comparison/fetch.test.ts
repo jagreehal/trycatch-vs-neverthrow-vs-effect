@@ -1,17 +1,17 @@
 /**
  * Fetch Helpers Comparison Tests
  *
- * This file demonstrates type-safe HTTP operations with Result types.
- * Note: These tests use mock implementations that mirror the awaitly/fetch API.
+ * Demonstrates type-safe HTTP with Result types using a local mock.
+ * Awaitly 4 has no `awaitly/fetch` — wrap native `fetch` with `tryAsync`.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { ok, err, type Result, type AsyncResult } from 'awaitly';
+import { describe, it, expect } from 'vitest';
+import { ok, err, type AsyncResult } from 'awaitly';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mock fetch utilities (representing awaitly/fetch API)
+// Local educational mock (pattern for tryAsync + domain errors)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Default error types from awaitly/fetch
+// Example domain error types for HTTP boundaries
 type FetchErrorType =
   | 'NOT_FOUND'
   | 'BAD_REQUEST'
@@ -86,14 +86,6 @@ async function fetchText(
   options?: { method?: string; body?: string }
 ): AsyncResult<string, FetchError> {
   const result = await fetchJson<string>(url, options);
-  return result;
-}
-
-async function fetchBlob(
-  url: string,
-  options?: { method?: string }
-): AsyncResult<Blob, FetchError> {
-  const result = await fetchJson<Blob>(url, options);
   return result;
 }
 

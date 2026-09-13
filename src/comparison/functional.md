@@ -46,7 +46,7 @@ const signUp = (email: string, password: string) =>
 
 **Cons:**
 - Nested callbacks for multi-step chains
-- Can't easily extract reusable pipelines
+- Extracting a reusable pipeline takes a wrapper function
 - Variable scoping gets awkward
 
 ### 2. Effect (pipe/flow)
@@ -102,149 +102,50 @@ const validateUser = flow(
 
 **Cons:**
 - Requires learning Effect paradigm
-- Heavy bundle for just composition
+- Heavy bundle if composition is all you need
 
-### 3. Awaitly Functional (v1.11.0)
+### 3. Awaitly 4 Result Combinators
 
-`awaitly/functional` provides Effect-style utilities for Result types:
+Awaitly 4 exports data-first Result combinators from `awaitly` / `awaitly/result`. They operate on **sync** `Result` values, so the callback to `andThen` returns a `Result` rather than an `AsyncResult`. For async sequential work, use manual checks + `ErrorsOf`, or `run(deps, fn)`.
 
 ```typescript
-import { pipe, flow, compose, R } from 'awaitly/functional';
-import { ok, err, type Result, type AsyncResult } from 'awaitly';
+import { andThen, map, mapError, ok, run, type ErrorsOf } from 'awaitly';
 
-// Define individual functions (same as before)
-const validateEmail = (email: string): Result<string, 'INVALID_EMAIL'> =>
-  email.includes('@') ? ok(email) : err('INVALID_EMAIL');
+// Sync Result pipeline
+const validated = validateUser(input); // Result, not AsyncResult
+const enriched = andThen(validated, enrichUser);
+const projected = map(enriched, (user) => ({ id: user.id, name: user.name }));
+const result = mapError(projected, toApiError);
 
-const validatePassword = (password: string): Result<string, 'WEAK_PASSWORD'> =>
-  password.length >= 8 ? ok(password) : err('WEAK_PASSWORD');
+// Async sequential composition
+const deps = { fetchUser, fetchPosts };
+type LoadErrors = ErrorsOf<typeof deps>;
 
-const createUser = (
-  email: string,
-  password: string
-): AsyncResult<User, 'DB_ERROR'> =>
-  db
-    .insert({ email, password })
-    .then((user) => ok(user))
-    .catch(() => err('DB_ERROR'));
-
-// Compose with pipe (apply value through functions)
-const signUp = (email: string, password: string) =>
-  pipe(
-    { email, password },
-    (data) => validateEmail(data.email),
-    R.andThen((validEmail) =>
-      pipe(
-        validatePassword(password),
-        R.map((validPassword) => ({ email: validEmail, password: validPassword }))
-      )
-    ),
-    R.andThen(({ email, password }) => createUser(email, password))
-  );
-
-// Create reusable pipelines with flow
-const validateUserData = flow(
-  (data: { email: string; password: string }) => validateEmail(data.email),
-  R.andThen((email) =>
-    R.map(validatePassword(data.password), (password) => ({ email, password }))
-  )
-);
-
-// Use in workflow
-const workflow = createWorkflow('createUser', { validateUserData, createUser });
-
-const result = await workflow(async ({ step, deps }) => {
-  const validated = await step('validateUserData', () => deps.validateUserData({ email, password }));
-  return await step('createUser', () => deps.createUser(validated.email, validated.password));
+const asyncResult = await run(deps, async (s) => {
+  const user = await s.fetchUser('1');
+  const posts = await s.fetchPosts(user.id);
+  return { user, posts };
 });
 ```
 
-## R Namespace Reference
+There is no `awaitly/functional` package and no `pipe`/`flow`/`R` namespace in Awaitly 4. Collection helpers such as `all`, `allAsync`, `allSettled`, and `any` are exported from `awaitly`. The companion `functional.test.ts` uses a local educational mock of `pipe`/`R` for sync Result demos only.
 
-The `R` namespace provides curried, pipeable functions for Results:
+Two Awaitly 4 changes affect the collection helpers:
 
-```typescript
-import { R } from 'awaitly/functional';
-
-// Transform success values
-R.map((x) => x * 2)           // Result<A, E> => Result<B, E>
-
-// Transform error values
-R.mapError((e) => new Error(e)) // Result<A, E1> => Result<A, E2>
-
-// Chain operations (flatMap)
-R.andThen((x) => fetchData(x))  // Result<A, E1> => Result<B, E1 | E2>
-
-// Recover from errors
-R.orElse((e) => ok(defaultValue)) // Result<A, E> => Result<A, F>
-
-// Extract value with default
-R.unwrapOr(defaultValue)        // Result<A, E> => A
-
-// Side effects without changing value
-R.tap((x) => console.log(x))    // Result<A, E> => Result<A, E>
-R.tapError((e) => logError(e))  // Result<A, E> => Result<A, E>
-
-// Conditional execution
-R.filter(predicate, error)      // Result<A, E> => Result<A, E | E2>
-```
-
-## Collection Utilities
-
-```typescript
-import { all, allAsync, allSettled, any, race, traverse } from 'awaitly/functional';
-
-// all: Combine sync Results (first-error semantics)
-const result = all([
-  validateEmail(email),
-  validatePassword(password),
-  validateUsername(username),
-]);
-// Result<[string, string, string], 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'INVALID_USERNAME'>
-
-// allAsync: Combine async Results
-const result = await allAsync([
-  fetchUser(userId),
-  fetchPosts(userId),
-  fetchComments(userId),
-]);
-
-// allSettled: Collect ALL errors (for form validation)
-const result = allSettled([
-  validateEmail(email),
-  validatePassword(password),
-]);
-// Error contains array of all failures
-
-// any: First success wins (for fallbacks)
-const result = await any([
-  tryCache(key),
-  tryDatabase(key),
-  tryApi(key),
-]);
-
-// race: First to complete (success or error)
-const result = await race([
-  fetchFromEurope(),
-  fetchFromAsia(),
-]);
-
-// traverse: Map then combine
-const result = await traverse(userIds, (id) => fetchUser(id));
-// Equivalent to: allAsync(userIds.map(id => fetchUser(id)))
-```
+- `any` / `anyAsync` take a **non-empty** tuple. An empty array is now a compile error and `EmptyInputError` is gone from the return type, so that case disappears before it ships. A value typed as a plain `Result[]` needs a non-empty tuple type or a length check, since TypeScript cannot tell whether it has elements.
+- `allAsync` / `anyAsync` no longer report `PromiseRejectedError`. A rejected promise is a thrown exception, which `UnexpectedError` and `catchUnexpected` already cover, so it no longer widens every caller's union. `anyAsync` also stops letting a thrown racer mask a modelled failure: a modelled error always wins, and the exception propagates only if every racer threw. `allSettledAsync` is unchanged, since per-item `PromiseRejectedError` is the point of it.
 
 ## Comparison Table
 
-| Feature | Neverthrow | Effect | Awaitly Functional |
-|---------|------------|--------|-------------------|
-| **API Style** | Method chaining | pipe/flow/gen | pipe/flow/R |
-| **Reusable Pipelines** | Limited | `flow` | `flow` |
-| **Curried Helpers** | No | Yes | `R` namespace |
-| **Collection Utils** | `combine` | `Effect.all` | `all/allAsync/traverse` |
+| Feature | Neverthrow | Effect | Awaitly 4 |
+|---------|------------|--------|-----------|
+| **API Style** | Method chaining | pipe/flow/gen | Data-first combinators + `run(deps)` |
+| **Reusable Pipelines** | Limited | `flow` | Sync `andThen`/`map`; async via `run` |
+| **Curried Helpers** | No | Yes | No (data-first) |
+| **Collection Utils** | `combine` | `Effect.all` | `all` / `allAsync` / `allSettled` |
 | **First-Success** | No | `Effect.firstSuccessOf` | `any` |
 | **All-Errors** | `combineWithAllErrors` | `Effect.all({ mode: 'either' })` | `allSettled` |
-| **Learning Curve** | Low | High | Low-Medium |
+| **Learning Curve** | Low | High | Low |
 | **Bundle Size** | Small | Large | Small |
 | **Ecosystem** | Minimal | Massive | Focused |
 
@@ -260,29 +161,29 @@ const result = await traverse(userIds, (id) => fetchUser(id));
 - Need structured concurrency
 - Building complex domain models
 
-### Choose Awaitly Functional When:
-- Want Effect-style composition without full Effect
+### Choose Awaitly 4 When:
+- Want Result types with async/await composition (`run(deps, fn)`)
 - Transitioning from Neverthrow
-- Need collection utilities (any, race, traverse)
-- Using Awaitly workflows
+- Need collection utilities (`any`, `allSettled`) without Effect
+- Using Awaitly workflows for caching/resume
 
 ## Conclusion
 
 For **Functional Composition**:
-- **Awaitly Functional** bridges the gap between Neverthrow's simplicity and Effect's power. Same `pipe`/`flow` patterns, but for Result types you already know.
+- **Awaitly 4** bridges Neverthrow's Result model and Effect-style composition via deps-first `run`, without requiring generators or a `pipe`/`R` DSL.
 - **Effect** remains the gold standard if you need the full ecosystem (Layers, Fibers, Streams).
 - **Neverthrow** method chaining works for simple cases but doesn't scale to complex pipelines.
 
 ### Honest Assessment
 
-**Awaitly Functional Strengths:**
-- Familiar `pipe`/`flow` patterns from Effect
-- Works with existing Result types
+**Awaitly 4 Strengths:**
+- Familiar `ok`/`err` Result types
+- `run(deps, fn)` keeps multi-step flows linear
 - Smaller learning curve than full Effect
-- Useful collection utilities (any, race, traverse)
+- Useful collection utilities (`any`, `allSettled`)
 
-**Awaitly Functional Limitations:**
+**Awaitly 4 Limitations:**
 - No Fiber semantics or structured concurrency
 - No Effect's Layer/Context for DI
-- Less comprehensive than Effect's combinators
-- Designed as stepping stone, not replacement
+- Sync combinators only, so async chaining is manual or goes through `run`
+- Not a full Effect replacement

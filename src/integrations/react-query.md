@@ -4,7 +4,7 @@ Combine TanStack Query's server state management with Awaitly's typed Results fo
 
 ## Why Combine Them?
 
-- **Type-safe errors in components**: Handle `NOT_FOUND`, `UNAUTHORIZED`, etc. explicitly
+- **Type-safe errors in components**: Handle `NOT_FOUND`, `UNAUTHORIZED`, and friends by name
 - **Server returns Result, client handles**: Clean separation of concerns
 - **Works with React Server Components**: Same patterns work with RSC and server actions
 
@@ -380,8 +380,7 @@ export type CreateUserInput = z.infer<typeof CreateUserSchema>;
 
 // Server
 // src/api/users.ts
-import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, run, type AsyncResult } from 'awaitly';
 import { CreateUserSchema } from '@/schemas/user';
 
 type CreateUserError =
@@ -389,21 +388,19 @@ type CreateUserError =
   | { type: 'EMAIL_TAKEN' }
   | { type: 'DB_ERROR' };
 
-export const createUser = async (
-  input: unknown
-): AsyncResult<User, CreateUserError> => {
-  return run(async ({ step }) => {
-    // Validate
-    const data = await step('validateInput', () => zodToResult(CreateUserSchema, input));
-
-    // Create
-    const user = await step('createUser', () => prismaToResult(() =>
-      db.user.create({ data })
-    ));
-
-    return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<User, CreateUserError>;
-};
+export const createUser = (input: unknown) =>
+  run(
+    {
+      validateInput: async () => zodToResult(CreateUserSchema, input),
+      insertUser: async (data: CreateUserInput) =>
+        prismaToResult(() => db.user.create({ data })),
+    },
+    async (s) => {
+      const data = await s.validateInput();
+      return await s.insertUser(data);
+    }
+  );
+// createUser(...) resolves to AsyncResult<User, CreateUserError | UnexpectedError>
 
 // Client hook with optimistic updates
 export const useCreateUser = () => {
@@ -659,4 +656,4 @@ const { data } = useQuery({
 2. **Conditional retry**: Don't retry on business errors like `NOT_FOUND` or `UNAUTHORIZED`
 3. **Error boundaries**: Let `SERVER_ERROR` types bubble up to error boundaries
 4. **Optimistic updates**: Rollback optimistic updates when Result is an error
-5. **Server Components**: Use Results directly in RSC, no need for `useQuery`
+5. **Server Components**: Use Results in RSC, no need for `useQuery`

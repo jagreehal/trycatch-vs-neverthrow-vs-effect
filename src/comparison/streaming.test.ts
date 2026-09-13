@@ -3,14 +3,19 @@
  *
  * This file demonstrates streaming patterns with Result types.
  * Note: These tests use mock implementations to show the API patterns
- * that awaitly/streaming provides.
+ * that `awaitly/durable` provides.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { ok, err, type Result, type AsyncResult } from 'awaitly';
-import { createWorkflow } from 'awaitly/workflow';
+import { describe, it, expect } from 'vitest';
+import {
+  ok,
+  err,
+  createWorkflow,
+  type Result,
+  type AsyncResult,
+} from 'awaitly';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mock streaming utilities (representing awaitly/streaming API)
+// Mock streaming utilities (representing the awaitly/durable stream API)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Simulated map transformer
@@ -73,8 +78,6 @@ type LogLine = {
 };
 
 type ParseError = 'PARSE_ERROR';
-type ValidationError = 'INVALID_LOG';
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,7 +235,7 @@ describe('Streaming: integration with workflows', () => {
     const lines = ['hello', 'world', 'test'];
     let totalSaved = 0;
 
-    const result = await workflow(async ({ step, deps }) => {
+    const result = await workflow.run(async ({ step, deps }) => {
       // Process lines
       const processed: string[] = [];
       for (const line of lines) {
@@ -271,7 +274,7 @@ describe('Streaming: integration with workflows', () => {
 
     const lines = ['hello', 'bad', 'world'];
 
-    const result = await workflow(async ({ step, deps }) => {
+    const result = await workflow.run(async ({ step, deps }) => {
       const processed: string[] = [];
       for (const line of lines) {
         const lineResult = await step('processLine', () => deps.processLine(line));

@@ -1,14 +1,15 @@
 /**
  * Functional Utilities Comparison Tests
  *
- * This file demonstrates functional composition patterns for Result types.
- * Note: These tests use implementations that mirror the awaitly/functional API.
+ * Educational sync Result composition demos using a local pipe/R mock.
+ * Awaitly 4 has no `awaitly/functional` package — use real `andThen`/`map`
+ * for sync Results, or `run(deps, fn)` for async sequential work.
  */
 import { describe, it, expect } from 'vitest';
 import { ok, err, type Result, type AsyncResult } from 'awaitly';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mock functional utilities (representing awaitly/functional API)
+// Local educational mock (not an Awaitly package)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // pipe: Apply functions left-to-right to a value
@@ -136,12 +137,6 @@ async function any<T, E>(
     errors.push(result.error);
   }
   return err(errors);
-}
-
-async function race<T, E>(
-  results: AsyncResult<T, E>[]
-): AsyncResult<T, E> {
-  return Promise.race(results);
 }
 
 async function traverse<T, U, E>(
