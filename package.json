@@ -5,10 +5,18 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest -w",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "test": "vitest run src --exclude 'src/___temp___/**'",
+    "test:watch": "vitest src -w --exclude 'src/___temp___/**'",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "prepare": "effect-tsgo patch",
+    "analyze:awaitly": "awaitly-analyze src/workflow-version.test.ts --no-types --format=mermaid",
+    "analyze:effect": "effect-analyze src/effect-version.test.ts",
+    "analyze:explain": "effect-analyze src/effect-version.test.ts --format explain",
+    "analyze:audit": "effect-analyze src --coverage-audit --quiet",
+    "analyze:errors": "effect-analyze src --error-channel",
+    "analyze:lint": "effect-analyze src --lint-source",
+    "analyze:check": "awaitly-analyze src/comparison/data-pipeline.test.ts --no-types --assert-diagrammable"
   },
   "keywords": [
     "typescript",
@@ -18,21 +26,19 @@
   "author": "Jag Reehal",
   "license": "ISC",
   "devDependencies": {
-    "@effect/eslint-plugin": "^0.3.2",
-    "@eslint/compat": "^2.0.2",
-    "@eslint/eslintrc": "^3.3.3",
-    "@eslint/js": "^10.0.1",
-    "eslint": "^10.0.0",
-    "eslint-plugin-awaitly": "^0.13.0",
-    "eslint-plugin-neverthrow": "^1.1.4",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.55.0",
-    "vitest": "^4.0.18"
+    "@effect/tsgo": "0.45.0",
+    "awaitly-analyze": "0.31.0",
+    "effect-analyzer": "3.6.0",
+    "eslint-plugin-awaitly": "^4.0.0",
+    "oxlint": "1.82.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   },
   "dependencies": {
-    "awaitly": "^1.24.0",
-    "effect": "^3.19.17",
+    "awaitly": "^6.1.0",
+    "effect": "4.0.0-rc.112",
     "neverthrow": "^8.2.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.4"
   }
 }

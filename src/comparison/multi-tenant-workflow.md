@@ -1,6 +1,6 @@
 # Real-World Scenario: Multi-Tenant Workflow
 
-**Scenario:** A SaaS workflow that behaves differently based on the Tenant's Plan (Free vs Pro vs Enterprise).
+**Scenario:** A SaaS workflow whose behaviour depends on the Tenant's Plan (Free vs Pro vs Enterprise).
 **Key Constraints:** Conditional logic (if/else/switch), branching paths.
 
 See the code: `multi-tenant-workflow.test.ts`
@@ -8,13 +8,16 @@ See the code: `multi-tenant-workflow.test.ts`
 ## The Approaches
 
 ### 1. The Awaitly Approach
-*Just JavaScript.*
+
+*This scenario uses `createWorkflow` because tenant processing needs conditional steps and HITL. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+
+*Plain JavaScript.*
 
 Since Awaitly uses standard `async/await`, you can use standard JavaScript control flow statements like `if`, `else`, and `switch`.
 
 ```typescript
 // It's just standard code!
-return workflow(async ({ step, deps }) => {
+return workflow.run(async ({ step, deps }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId), {
     description: 'Fetch tenant',
     key: `tenant:${tenantId}`,
@@ -27,7 +30,7 @@ if (tenant.plan === 'free') {
     { description: 'Calculate usage (free plan)', key: `usage:${tenantId}:free` }
   );
 } else {
-  const { users, resources } = await step.parallel('Fetch tenant data', {
+  const { users, resources } = await step.all('Fetch tenant data', {
     users: () => deps.fetchUsers(tenantId),
     resources: () => deps.fetchResources(tenantId),
   }
@@ -60,13 +63,63 @@ if (tenant.plan === 'free') {
 
 **Pros:**
 - **Zero Friction:** No need to learn "functional" equivalents of `if` statements.
-- **Readability:** Junior devs understand this immediately.
+- **Readability:** A dev new to the codebase can read this on day one.
 - **Human-in-the-Loop:** For multi-tenant workflows needing approval (e.g., enterprise plan changes), Awaitly provides `createHITLOrchestrator` for pausing workflows pending human approval.
+
+**What the analyzer sees.** Plain `if` and `switch` are diagrammable. `awaitly-analyze src/comparison/multi-tenant-workflow.test.ts` derives the branch labels from the conditions in the source, so the `'pro'` and `'enterprise'` arms and the free-plan shortcut all appear:
+
+```mermaid
+flowchart TB
+
+  start((Start))
+  step_1["fetchTenant"]
+  err_step_1_TenantError["TenantError"]
+  decision_2{"tenant.plan !== 'free'"}
+  parallel_fork_3{{"Fetch tenant data (all)"}}
+  parallel_join_4{{"Join"}}
+  step_5["users"]
+  err_step_5_UserError["UserError"]
+  step_6["resources"]
+  err_step_6_ResourceError["ResourceError"]
+  step_7["calculateUsage"]
+  err_step_7_USAGE_CALCULATION_FAILED["USAGE_CALCULATION_FAILED"]
+  switch_8{"switch: tenant.plan"}
+  step_9["sendBillingNotification"]
+  err_step_9_NOTIFICATION_FAILED["NOTIFICATION_FAILED"]
+  step_10["sendBillingNotification"]
+  err_step_10_NOTIFICATION_FAILED["NOTIFICATION_FAILED"]
+  step_11["calculateUsageFree"]
+  err_step_11_USAGE_CALCULATION_FAILED["USAGE_CALCULATION_FAILED"]
+  end_node((End))
+
+  step_1 -->|TenantError| err_step_1_TenantError
+  step_5 -->|UserError| err_step_5_UserError
+  parallel_fork_3 -->|branch 1| step_5
+  step_5 --> parallel_join_4
+  step_6 -->|ResourceError| err_step_6_ResourceError
+  parallel_fork_3 -->|branch 2| step_6
+  step_6 --> parallel_join_4
+  step_7 -->|USAGE_CALCULATION_FAILED| err_step_7_USAGE_CALCULATION_FAILED
+  parallel_join_4 --> step_7
+  step_9 -->|NOTIFICATION_FAILED| err_step_9_NOTIFICATION_FAILED
+  switch_8 -->|'pro'| step_9
+  step_10 -->|NOTIFICATION_FAILED| err_step_10_NOTIFICATION_FAILED
+  switch_8 -->|'enterprise'| step_10
+  step_7 --> switch_8
+  decision_2 -->|true| parallel_fork_3
+  step_11 -->|USAGE_CALCULATION_FAILED| err_step_11_USAGE_CALCULATION_FAILED
+  decision_2 -->|false| step_11
+  step_1 --> decision_2
+  start --> step_1
+  step_9 --> end_node
+  step_10 --> end_node
+  step_11 --> end_node
+```
 
 #### Approval Workflows for Enterprise Tenants
 
 ```typescript
-import { createHITLOrchestrator, pendingApproval } from 'awaitly/hitl';
+import { createHITLOrchestrator, pendingApproval } from 'awaitly/durable';
 
 const orchestrator = createHITLOrchestrator({ approvalStore, workflowStateStore });
 
@@ -104,7 +157,7 @@ return fetchTenant(id).andThen(tenant => {
 
 **Cons:**
 - **Awkward Branching:** `if/else` inside chains often feels clunky.
-- **Type Mismatches:** All branches must return compatible `Result` types, which can be annoying to align manually.
+- **Type Mismatches:** All branches must return compatible `Result` types, which takes some work to align by hand.
 
 ### 3. The Effect Approach
 *Generators enable imperative control flow.*
@@ -126,6 +179,46 @@ Effect.gen(function* () {
 **Cons:**
 - **Setup:** Still requires the Effect boilerplate (`Effect.gen`, `runPromise`, etc.).
 
+**What the analyzer sees.** `effect-analyze src/comparison/multi-tenant-workflow.test.ts` reads the same `if` statements out of the generator and draws the users/resources fork. Style lines trimmed:
+
+```mermaid
+flowchart TB
+
+  start((Start))
+  end_node((End))
+
+  n2["tenant <- fetchTenantEffect <Tenant, TenantError, never> (side-effect)"]
+  decision_4{"tenant.plan === 'free'"}
+  n5["return"]
+  term_6(["return"])
+  n7["calculateUsageEffect <Usage, 'USAGE_CALCULATION_FAILED', never> (side-effect)"]
+  n8["Effect.all (2) (concurrency)"]
+  parallel_fork_9{{"All (2)"}}
+  parallel_join_9{{"Join"}}
+  n10["fetchUsersEffect <User(), UserError, never> (side-effect)"]
+  n11["fetchResourcesEffect <Resource(), ResourceError, never> (side-effect)"]
+  n12["usage <- calculateUsageEffect <Usage, 'USAGE_CALCULATION_FAILED', never> (side-effect)"]
+  decision_14{"tenant.plan === 'pro' &#124;&#124; tenant.plan ===..."}
+  n15["sendBillingNotificationEffect <void, 'NOTIFICATION_FAILED', never> (side-effect)"]
+
+  n5 --> n7
+  n7 --> term_6
+  decision_4 -->|yes| n5
+  n2 --> decision_4
+  n8 --> parallel_fork_9
+  parallel_fork_9 -->|fetchUsersEffect| n10
+  n10 --> parallel_join_9
+  parallel_fork_9 -->|fetchResourcesEffect| n11
+  n11 --> parallel_join_9
+  decision_4 --> n8
+  parallel_join_9 --> n12
+  decision_14 -->|yes| n15
+  n12 --> decision_14
+  start --> n2
+  n15 --> end_node
+  decision_14 --> end_node
+```
+
 ## Comparison Table
 
 | Feature | Awaitly | Neverthrow | Effect |
@@ -136,13 +229,13 @@ Effect.gen(function* () {
 | **Approval Workflows** | Built-in (HITL) | Manual | Manual |
 | **Durable Execution** | Built-in | Manual | Manual |
 
-### Rate-Limited Tenant Processing with step.sleep() (v1.11.0)
+### Rate-Limited Tenant Processing with step.sleep() (Awaitly 4)
 
 For multi-tenant workflows that need rate limiting between API calls:
 
 ```typescript
-import { createWorkflow } from 'awaitly/workflow';
-import { seconds, minutes } from 'awaitly/duration';
+import { createWorkflow } from 'awaitly';
+import { seconds, minutes } from 'awaitly';
 
 const processTenants = createWorkflow('processTenants', {
   fetchTenants,
@@ -151,9 +244,9 @@ const processTenants = createWorkflow('processTenants', {
   syncToDataWarehouse,
 });
 
-const result = await processTenants(async ({ step, deps }) => {
+const result = await processTenants.run(async ({ step, deps }) => {
   const tenants = await step('fetchTenants', () => deps.fetchTenants(), {
-    name: 'Fetch all tenants',
+    description: 'Fetch all tenants',
     key: 'fetch-tenants',
   });
 
@@ -204,49 +297,13 @@ const result = await processTenants(async ({ step, deps }) => {
 - Polling intervals with backoff
 - Graceful delays before cleanup
 
-### Functional Composition for Tenant Processing (v1.11.0)
+### Result Composition for Tenant Processing (Awaitly 4)
 
-For teams preferring Effect-style composition:
-
-```typescript
-import { pipe, flow, R } from 'awaitly/functional';
-
-// Define reusable tenant processing pipeline
-const processTenantUsage = flow(
-  fetchTenantData,
-  R.andThen(calculateUsage),
-  R.map((usage) => ({ ...usage, timestamp: Date.now() })),
-  R.mapError((e) => new TenantProcessingError(e))
-);
-
-// Use in workflow
-const workflow = createWorkflow('workflow', { processTenantUsage, sendBilling });
-
-const result = await workflow(async ({ step, deps }) => {
-  const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId));
-
-  // Compose validation pipeline
-  const validated = pipe(
-    tenant,
-    validateTenantActive,
-    R.andThen(validateBillingInfo),
-    R.andThen(validateUsageLimits)
-  );
-
-  if (!validated.ok) {
-    return err(validated.error);
-  }
-
-  const usage = await step('processTenantUsage', () => deps.processTenantUsage(tenant));
-  await step('sendBilling', () => deps.sendBilling(tenant, usage));
-
-  return { tenantId: tenant.id, billed: usage.total };
-});
-```
+Awaitly 4 exports Result combinators from `awaitly` and `awaitly/result`. For this multi-step tenant workflow, `run(deps, fn)` or `createWorkflow()` remains the clearest form; there is no `awaitly/functional` entry point.
 
 ## Conclusion
 
 For **Logic with Branching (Multi-Tenant)**:
-- **Awaitly** offers the best DX: imperative control flow, automatic type unions, built-in support for approval workflows (HITL), durable execution, rate limiting with `step.sleep()`, and optional Effect-style composition with `awaitly/functional`.
+- **Awaitly** offers the best DX: imperative control flow, automatic type unions, built-in support for approval workflows (HITL), durable execution, rate limiting with `step.sleep()`, and root Result combinators.
 - **Effect** offers excellent syntax via generators and powerful concurrency, but lacks built-in HITL.
 - **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic.

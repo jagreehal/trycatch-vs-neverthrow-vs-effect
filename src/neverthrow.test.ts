@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { Result, ResultAsync, ok, err, okAsync, errAsync } from 'neverthrow';
+import { Result, ResultAsync, okAsync, errAsync } from 'neverthrow';
 
 // --- Types / errors
 export type Currency = 'GBP' | 'EUR' | 'USD';
@@ -236,7 +236,7 @@ const makeDb = (): Db => {
           existing[p.idemKey] = { id: p.providerPaymentId };
         },
         insertAudit: async () => {},
-      } as any),
+      }),
   };
 };
 
@@ -301,7 +301,7 @@ describe('neverthrow', () => {
     const db: Db = {
       ...makeDb(),
       acquireLock: async () => false,
-    } as Db;
+    };
     const provider = makeProvider();
     const result = await createPaymentNeverthrow(
       db,

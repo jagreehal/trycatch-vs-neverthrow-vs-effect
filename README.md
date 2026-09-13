@@ -2,38 +2,33 @@
 
 **Or: How I learned to stop worrying and embrace failure**
 
-Here's the thing about software: it fails. Not sometimes. **Always**.
+Software fails. Your database goes down mid-transaction, the payment provider times out, and someone types "banana" into a field you assumed held a number.
 
-The database decides to take a nap right when you need it. The payment provider goes for a coffee break. The user types "banana" where you expected a number.
-
-Most programmers treat errors like embarrassing relatives: they pretend they don't exist until they show up drunk at the family reunion and ruin everything.
-
-But what if we treated errors as first-class citizens? What if failure was just another path through our code, not a derailment?
+For years I handled errors one way: ignore them until one shows up drunk at the family reunion and ruins everything. Treat errors as values instead, and failure becomes another path through your code rather than a derailment.
 
 ## The Problem: Building a Payment System That Won't Bankrupt You
 
-Let's say you're building a payment system. Not a toy one: a real one that handles actual money and can't afford to lose a penny or charge someone twice.
+You're building a payment system that handles real money. It cannot lose a penny or charge anyone twice.
 
-Each step in this system fails in its own special way. To handle them properly, we first need to classify them:
+Each step fails in its own way, so start by classifying them:
 
-1.  **Domain Errors** (e.g., `ValidationError`): Invalid user input like `{amount: "banana"}`. These are expected and should be handled with clear feedback.
-2.  **Concurrency Errors** (e.g., `IdempotencyConflict`): Mobile apps retrying 47 times and hitting race conditions. Requires locking or deduplication.
-3.  **Dependency Errors** (e.g., `ProviderUnavailable`, `Timeout`): The external payment provider having a bad day. Usually requires retries or failover.
-4.  **Infrastructure Errors** (e.g., `PersistError`, `DatabaseError`): Your own database failing. Often requires paging an engineer.
+1.  **Domain Errors** (e.g., `ValidationError`): Invalid user input like `{amount: "banana"}`. You expect these and give the caller clear feedback.
+2.  **Concurrency Errors** (e.g., `IdempotencyConflict`): A mobile app retries 47 times and hits a race condition. You need locking or deduplication.
+3.  **Dependency Errors** (e.g., `ProviderUnavailable`, `Timeout`): The payment provider is having a bad day. You retry or fail over.
+4.  **Infrastructure Errors** (e.g., `PersistError`, `DatabaseError`): Your own database fell over. Someone gets paged.
 5.  **Unexpected Errors** (e.g., Bugs): The `undefined is not a function` special.
 
-This is where our four approaches start to diverge. What you're really choosing isn't just a library; you're choosing whether your error handling is exception-based, explicit Result-based, or Result-based with orchestration and policies on top.
+The four approaches diverge here. You are picking between exception-based handling, explicit Result-based handling, and Results with orchestration and policies layered on top.
 
-(In practice, some errors overlap categories: for example, a provider 4xx is a dependency error, but it's often treated as a domain-level "hard fail" in business logic.)
+(Some errors straddle categories. A provider 4xx is a dependency error, but business logic often treats it as a domain-level hard fail.)
 
-**The Goal: Three Criteria for Great Error Handling**
+**Three criteria to judge any approach**
 
-Whatever approach you choose, evaluate it against these three benchmarks:
-1.  **Visible**: Can you see all the ways your code can fail just by looking at it?
-2.  **Composable**: Do errors make it painful to combine functions together?
-3.  **Honest**: Do your function signatures tell the truth about what might happen?
+1.  **Visible**: Can you see every way the code fails by reading it?
+2.  **Composable**: Do errors make functions painful to combine?
+3.  **Honest**: Do your signatures tell the truth about what might happen?
 
-The trade-off is almost always local ergonomics vs consistency and visibility across the codebase.
+You trade local ergonomics against consistency and visibility across the codebase.
 
 ```mermaid
 graph TD
@@ -69,25 +64,117 @@ graph TD
 
 ## At a Glance: Practical Comparison
 
-All four approaches model the same payment workflow. In the repo, the implementations are exercised by a shared test suite.
+All four approaches model the same payment workflow, and a shared test suite in this repo exercises every implementation.
 
-| Approach | Error Visibility | Composability | Ergonomics | Streaming | Functional | Type-Safe Fetch | ESLint Plugin |
+| Approach | Error Visibility | Composability | Ergonomics | Streaming | Functional | Type-Safe Fetch | Lint Plugin |
 |----------|-----------------|---------------|------------|-----------|------------|-----------------|---------------|
 | **Vanilla (try/catch)** | Low (hidden) | Medium (wraps) | High | Manual | Manual | Manual | - |
 | **Neverthrow** | High | High | High (chains) | Manual | Manual | Manual | ✓ |
 | **Effect** | Very High | Very High | Low → Medium | ✓ Stream | ✓ pipe/flow | ✓ HttpClient | ✓ |
-| **Awaitly** | High | High | High (async/await) | ✓ Streaming | ✓ pipe/flow | ✓ fetchJson | ✓ |
+| **Awaitly** | High | High | High (async/await) | ✓ Streaming | Result combinators | Native fetch + `tryAsync` | ✓ |
 
-**Key Differentiators:**
+**Key differences:**
 
-- **Vanilla**: Simplest to write, but errors hide in function signatures.
-- **Neverthrow**: Best for functional chaining and explicit error types.
-- **Effect**: Most powerful ecosystem (DI, layers, scheduling, tracing, streams) but has a steep learning curve.
-- **Awaitly**: Familiar async/await syntax with error inference, retries, timeouts, caching, streaming, functional utilities (`pipe`/`flow`), and type-safe fetch helpers.
+- **Vanilla**: Fastest to write. Errors hide in the signature.
+- **Neverthrow**: Typed Results with method chaining.
+- **Effect**: The largest ecosystem (DI, layers, scheduling, tracing, streams) and the steepest learning curve.
+- **Awaitly**: Typed Results with the same `ok`/`err` model as neverthrow, kept in async/await. Workflows, caching, and policies stay optional.
+
+## What You Pay For
+
+Awaitly ships four entry points, sets `sideEffects: false`, and has one runtime dependency: `@opentelemetry/api`, added in 4.5 for built-in tracing, which no-ops until you register a provider. Your bundler drops whatever you skip. Measured with esbuild 0.28 (`--bundle --minify`, ESM), importing only what each line names:
+
+| Import | Minified | Gzipped |
+|--------|----------|---------|
+| `awaitly/result` (`ok`, `err`) | 3.7 KB | **1.34 KB** |
+| `neverthrow` (`ok`, `err`) | 6.6 KB | 1.99 KB |
+| `awaitly` (Results, `run`, `createWorkflow`, `tryAsync`, `allAsync`) | 64.9 KB | 19.1 KB |
+| `effect` (`Effect.succeed` alone) | 81.5 KB | 28.6 KB |
+
+All four are small enough that most apps will never notice, and neverthrow in particular is doing a lot in under 2 KB. The table shows the shape of the curve: you start at 1.34 KB, and the bundle grows the week you import `createWorkflow` because caching has started to matter. About 3.3 KB of the `createWorkflow` line is the OpenTelemetry API that arrived with tracing in 4.5. `awaitly/result` has moved by a few dozen bytes across the 4.x, 5.x and 6.x releases, so the minimal-bundle guarantee holds.
+
+## Awaitly Grows With You
+
+Awaitly stacks optional layers, and you can stop at any of them.
+
+| Level | Import | When |
+|-------|--------|------|
+| Results only | `awaitly` or `awaitly/result` | Drop-in neverthrow alternative |
+| Composition | Manual checks + `ErrorsOf`, or `run(deps, fn)` | Async sequential work without workflows |
+| Orchestration | `createWorkflow`, `durable` | Caching, resume, HITL, policies |
+
+```mermaid
+flowchart TD
+  L1["Level1: ok/err + AsyncResult"] --> L2["Level2: manual or run deps"]
+  L2 --> L3["Level3: createWorkflow + durable"]
+```
+
+The layers matter because most libraries ask you to commit on day one. Level 1 is a `Result<T, E>` type and two constructors, so you can adopt it in one file and leave the rest of the codebase alone. When one workflow starts needing idempotency keys, you wrap that workflow and nothing else. Your existing Level 1 code keeps compiling.
+
+Migrating from raw promises stays cheap for the same reason. Awaitly returns Results from ordinary `async` functions, so your call sites keep `await` and your team keeps the mental model it already has. Compare the two migrations:
+
+```typescript
+// Before: a promise that throws
+const user = await fetchUser(id);
+
+// neverthrow: the call site changes shape
+const user = await fetchUser(id).match(
+  (u) => u,
+  (e) => { throw e; },
+);
+
+// awaitly: the call site keeps await, and adds one check
+const result = await fetchUser(id);
+if (!result.ok) return result;
+const user = result.value;
+```
+
+You convert one function at a time, and the functions you haven't touched still work.
+
+### Version notes
+
+This repo tracks **Awaitly 6.1**. The 4.0 release cut the entry points from thirteen to four:
+
+| Entry | Carries |
+|-------|---------|
+| `awaitly` | Results, `run`, `createWorkflow`, steps, resources, batching, policies |
+| `awaitly/result` | Result primitives only, the minimal-bundle guarantee |
+| `awaitly/durable` | Durable execution, persistence, sagas, human-in-the-loop, streaming, webhooks, engine |
+| `awaitly/testing` | Test helpers, kept out of production bundles |
+
+The release removed nothing. `awaitly/run` and `awaitly/workflow` folded into `awaitly`, and `awaitly/saga`, `awaitly/hitl`, `awaitly/streaming`, `awaitly/persistence`, `awaitly/webhook`, and `awaitly/engine` folded into `awaitly/durable`. The release treats reaching for `as const`, a cast, or a restated error list as a library problem, so the release removed each one rather than documenting it. See [api-comparison.md §3](./src/comparison/api-comparison.md) for what inferred error unions look like on hover.
+
+**4.1 continues that theme**, and three of its changes show up in this repo's examples:
+
+| Change | What it removes |
+|--------|-----------------|
+| `errors: ['PARSE_FAILED']` joins the workflow's error union | A `step.try` error that no dep produces used to need all four type parameters of `createWorkflow` spelled out |
+| Stream failures arrive as typed values (`STREAM_READ_ERROR`), like `STEP_TIMEOUT` | Infrastructure failures stop disguising themselves as `UnexpectedError`; only your own callback throws stay exceptions |
+| Optional options accept `undefined` | `cache: options?.cache` works under `exactOptionalPropertyTypes`, with no conditional spread per field (see `data-pipeline.test.ts`) |
+
+Also in 4.1: `durable.run` accepts a `streamStore`, so durable execution and streaming compose in one call, and `catchUnexpected` keeps a literal tag without `as const`.
+
+**4.2** finishes the job on declared errors. `durable.run` takes `errors` too, so the durable path can name an error its deps never produce, including putting `STREAM_READ_ERROR` in the static union. That is what makes the boundary `switch` in [data-pipeline.md §5](./src/comparison/data-pipeline.md) exhaustive instead of a string comparison.
+
+**4.3** is a DX pass with one change that matters for bundle claims: `StandardSchemaV1` now lives inside the package rather than arriving through `@standard-schema/spec`. The optional peer dependency resolved for nobody, so `pnpm add awaitly` could fail typechecking unless you had `skipLibCheck` on. Awaitly installed with no dependencies at all from that release until 4.5 added `@opentelemetry/api`. Retry options also speak one language across policies and steps (`delay`/`initialDelay`, `retryIf`/`shouldRetry`), invalid attempt counts throw at configuration time, and saga `compensate` accepts a `Result` return so `compensate: (p) => deps.refund(p.id)` needs no wrapper.
+
+**4.4** removes the `as const` tax on error literals. `err()` and the error mappers of `from`, `fromPromise`, `tryAsync`, `fromNullable`, `mapError`, `mapTry`, `mapErrorTry`, and `tryAsyncRetry` now take `const` type parameters, so `err({ type: 'NOT_FOUND', id })` keeps its discriminant instead of widening to `string` and losing exhaustive `switch`. `step.withTimeout` type-checks its timeout error, which before 4.4 never reached the result union. Two breaking changes to know about: inferred error literals now carry `readonly` modifiers, and `Result` dropped its third `cause` parameter, so `Result<T, E, C>` becomes `Result<T, E>`.
+
+**4.5** is the release that changes what this repo can claim about observability. Awaitly emits OpenTelemetry spans on its own, covering runs, steps, retry attempts, parallel and race scopes, sagas, compensations, and queued engine workflows. Each step runs inside its own active span, so spans from a database driver or HTTP client you already instrument nest under the step that made the call. That is the part an `onEvent` bridge could not reach, because a callback fires beside the step rather than inside it. Registering a provider is the whole setup, and without one the calls hit OpenTelemetry's no-op implementation. `AWAITLY_TELEMETRY=0`, `setTelemetryEnabled(false)`, or `telemetry: false` on a run turn it off.
+
+Three more things arrived with it. `TaggedError.toJSON` keeps the discriminant, message, and enumerable props across a wire, and omits the stack so a sender does not leak its file paths. An injectable `Clock` makes retry, sleep, timeout, and circuit-breaker tests deterministic. And `awaitly/error-require-discriminant` joins `recommended-strict`, reporting a class that extends `Error` without a string-literal `type` or `_tag`, since that is what keeps two error classes distinct in an inferred union. This repo turns that rule on for its awaitly code in [`.oxlintrc.json`](./.oxlintrc.json), which loads `eslint-plugin-awaitly` through oxlint's JS plugin support.
+
+Two changes to plan for. Retry no longer retries `UnexpectedError` or untagged throws by default, so a policy that relied on catching a thrown exception needs `retryIf: () => true`; typed errors still retry as before. And `@opentelemetry/api` is now a dependency, which is the 3.3 KB gzipped that the `awaitly` line in the bundle table picked up.
+
+**5.0** makes resume finer-grained. `step.forEach` checkpoints each iteration, so a resumed run skips the items it finished and re-runs the rest, and `step.retry` and `step.withTimeout` checkpoint by id under `durable.run`. A new `resumeFailedSteps` option decides what a resume restores: the default `'crashed'` retries thrown failures and keeps typed errors as decided, and `'all'` restores every failed step. `awaitly/durable` exports the `DurableStore` type that the postgres, mongo, and libsql adapters implement. One thing to check on upgrade: forEach checkpoints written by an earlier version re-run once.
+
+**6.0** has one breaking change. `step.forEach` raises `IterationLimitError` when a collection exceeds `maxIterations`, where it used to truncate in silence; pass `onMaxIterations: 'stop'` to keep the old behaviour. `awaitly/testing` gains `durableStoreContract`, a conformance suite for any store adapter. The lint plugin (now `eslint-plugin-awaitly` 4.0) resolves `step` and `deps` through lexical scopes, so aliased destructuring gets linted, and the `concurrency-no-promise-*` rules only fire inside workflow callbacks.
+
+**6.1** lets `step.retry` and `step.withTimeout` take `errors: [...]`, so a tag produced by a custom handler or attempt joins the static union at the call site. The analyzer reads those helpers inside `step.forEach` too.
+
+See [api-comparison.md](./src/comparison/api-comparison.md) for pattern-by-pattern examples at each level.
 
 ## Four Philosophies
-
-**Four ways to think about failure:**
 
 ```mermaid
 graph LR
@@ -115,10 +202,10 @@ graph LR
         C2 --> C3
     end
 
-    subgraph "Orchestrator (Workflow)"
-        D1["🎼 Declare steps"]
-        D2["🎯 Auto-infer errors"]
-        D3["🎬 Execute with step()"]
+    subgraph "Result + optional steps (Awaitly)"
+        D1["ok/err + AsyncResult"]
+        D2["Combinators or step()"]
+        D3["Workflows when needed"]
         D1 --> D2
         D2 --> D3
     end
@@ -128,7 +215,7 @@ graph LR
 
 "Everything will work fine... oh crap, something broke, quick, catch it!"
 
-This is the approach most developers know and love. Write your code assuming everything will work perfectly. When reality intrudes (and it will), let the exception bubble up until someone, somewhere, catches it.
+You already know this one. Write the code assuming it works, and when reality intrudes, let the exception bubble up until something catches it.
 
 ```typescript
 async function makePayment(data: unknown) {
@@ -145,7 +232,7 @@ async function makePayment(data: unknown) {
 }
 ```
 
-In real code, "convert" often means mapping unknown exceptions into a typed `InfrastructureError` at the boundary:
+In production code, "convert" tends to mean mapping unknown exceptions into a typed `InfrastructureError` at the boundary:
 
 ```typescript
 app.post('/pay', async (req, res) => {
@@ -161,9 +248,7 @@ app.post('/pay', async (req, res) => {
 
 **The Mental Model: The Trapeze Artist**
 
-Picture this: You're flying through the air doing complex acrobatics. You're focused on the performance, the timing, the catches, the crowd's applause. If something goes wrong? Well, there's a safety net down there somewhere.
-
-The beauty of this approach is its simplicity. The horror of this approach is also its simplicity.
+You're flying through the air doing acrobatics, focused on the timing, the catches, and the applause. If something goes wrong, there's a safety net down there somewhere. Simplicity is the whole appeal here, and you pay for it as the code grows.
 
 ```mermaid
 flowchart TD
@@ -192,27 +277,27 @@ flowchart TD
 
 **When to use this:**
 
-Use try/catch for simple operations, rapid prototyping, or at system boundaries (HTTP handlers, event listeners) where you need to catch unexpected errors and return an appropriate HTTP response.
+Reach for try/catch on simple operations, during prototyping, and at system boundaries like HTTP handlers and event listeners, where you catch whatever went wrong and return a status code.
 
 **The limitations:**
 
-**Function signatures hide failure modes**
+**Signatures hide failure modes**
 
-The signature says `Promise<{paymentId: string}>` but conceals 5+ different error types. You discover missing error handlers at runtime, usually in production.
+The signature says `Promise<{paymentId: string}>` and conceals five error types. You find the missing handler in production.
 
-**Happy path becomes scattered**
+**The happy path scatters**
 
-The success flow is interrupted by defensive try/catch blocks. Following the business logic requires jumping between success cases and error handling.
+Defensive try/catch blocks interrupt the success flow, so following the business logic means jumping between the two.
 
 **No static analysis of error paths**
 
-TypeScript cannot verify that you've handled all error cases. Forget to catch an error? The compiler shrugs. You find out when the pager goes off.
+TypeScript cannot verify you handled every case. Forget one and the compiler says nothing. The pager tells you instead.
 
 **Composition breaks down**
 
-Calling this from another function requires wrapping it in another try/catch. The complexity multiplies exponentially with each layer of abstraction.
+Calling this from another function means wrapping it in another try/catch, and each layer of abstraction adds one more.
 
-Don't get me wrong: this approach works great at system boundaries. HTTP controllers, event handlers, that sort of thing. But in your core business logic? It's like doing surgery with oven mitts.
+try/catch works well at system boundaries: HTTP controllers, event handlers, that sort of thing. In core business logic it's like doing surgery with oven mitts.
 
 ---
 
@@ -220,9 +305,7 @@ Don't get me wrong: this approach works great at system boundaries. HTTP control
 
 "Half of everything breaks, so let's plan for that from the start"
 
-What if failure wasn't a surprise? What if your functions were honest about what could go wrong, and the compiler actually helped you handle it?
-
-This is the world of Railway-Oriented Programming. Instead of pretending everything will work and then panicking when it doesn't, we build two tracks from the start: the success track and the failure track.
+Put failure in the signature and the compiler starts helping you. Railway-Oriented Programming gives you two tracks from the beginning: one for success, one for failure.
 
 ```typescript
 import { Result, ok, err } from 'neverthrow';
@@ -247,7 +330,7 @@ async function makePayment(
 
 **The Mental Model: Two Tracks, One Journey**
 
-Think of it like this: every function returns a train that's either on the success track or the error track. The train carries a `Result<Success, Error>` that's either:
+Every function hands you a train sitting on one of two tracks. It carries a `Result<Success, Error>`:
 
 - `Ok(value)`: "All good, staying on the success track"
 - `Err(error)`: "Something went wrong, switching to the error track"
@@ -285,19 +368,19 @@ flowchart LR
     end
 ```
 
-The key idea: once you're on the error track, you stay there until someone explicitly handles it. No more surprises. No more "oh wait, this could actually throw an exception."
+Once you're on the error track you stay there until you handle it.
 
 **When to use this:**
 
-Use neverthrow when your business logic has multiple failure modes that need different handling, when you need composable error handling, or when you want error-handling discipline in core logic.
+Pick neverthrow when your business logic has several failure modes that need different treatment, or when you want error-handling discipline the compiler enforces.
 
 **Why this works better:**
 
-**Function signatures are honest**
+**Signatures tell the truth**
 
-`Promise<Result<{paymentId: string}, PaymentError>>` tells you exactly what you're getting: either a payment ID or an error. No surprises, no hidden exceptions. The type system makes error handling explicit in the signature.
+`Promise<Result<{paymentId: string}, PaymentError>>` tells you what you're getting: a payment ID or an error. The type system puts error handling in the signature where you can see it.
 
-**Composition is natural**
+**Composition reads as a pipeline**
 
 ```typescript
 return parse(raw)
@@ -308,13 +391,33 @@ return parse(raw)
   .orElse((error) => handleSpecificErrors(error));
 ```
 
-It reads like a pipeline. Each step either succeeds and passes its result to the next step, or fails and jumps straight to the error handler. The flow is explicit and visual.
+Each step passes its result to the next or jumps to the error handler.
 
-**Note:** These advantages (honest signatures, natural composition, errors as data) apply equally to Awaitly. Both libraries implement railway-oriented programming with Result types. The difference is syntax: neverthrow uses method chaining (`.andThen()`), while Awaitly uses `step()` with async/await. If your team prefers async/await flows, Awaitly lets you keep that syntax while still getting early-exit error propagation.
+**Reaching for `safeTry` on longer flows**
 
-**Errors are data, not control flow**
+Method chaining reads well up to about four steps. Past that, keeping earlier values in scope pushes you into nesting, and this repo's `checkoutNeverthrow` sits three levels deep for six steps. neverthrow anticipated this and ships `safeTry`, which uses generators to flatten the same flow. If you hit the nesting, that's the tool to reach for.
 
-Instead of exceptions flying around, you have error values you can inspect, transform, and reason about. Want to log all validation errors differently from database errors? Easy. Want to retry only certain error types? Trivial.
+**Errors are data**
+
+You get error values you can inspect, transform, and reason about instead of exceptions in flight. Logging validation errors one way and database errors another takes a `switch`. Retrying only certain error types takes a predicate.
+
+**How Awaitly compares here**
+
+Honest signatures, composition, and errors-as-data apply to Awaitly the same way. Both libraries implement railway-oriented programming with Result types, and at Level 1 the two are near-identical in size and shape:
+
+```typescript
+// neverthrow
+import { ok, err, Result } from 'neverthrow';
+const parse = (raw: string): Result<Payment, 'INVALID'> =>
+  isValid(raw) ? ok(toPayment(raw)) : err('INVALID');
+
+// awaitly
+import { ok, err, type Result } from 'awaitly';
+const parse = (raw: string): Result<Payment, 'INVALID'> =>
+  isValid(raw) ? ok(toPayment(raw)) : err('INVALID');
+```
+
+Two differences follow from that. Awaitly reads results as plain properties (`result.ok`, `result.value`) rather than through `.isOk()` methods, so a Result survives `JSON.stringify` and crosses a worker boundary intact. And for multi-step flows, where neverthrow offers `.andThen()` chains and `safeTry`, Awaitly keeps you in async/await through `run(deps, fn)` or `step()`. Both get you to the same place, so pick the one that matches how your team already writes code.
 
 ---
 
@@ -322,11 +425,7 @@ Instead of exceptions flying around, you have error values you can inspect, tran
 
 "Let's describe exactly what should happen, then let the system figure it out"
 
-What if you didn't write code to do things, but instead wrote code to describe what should be done?
-
-What if timeouts, retries, logging, and dependency injection weren't scattered throughout your code like confetti, but were declared upfront as policies?
-
-Welcome to Effect, where you're not a programmer: you're an architect drawing blueprints.
+You write code that describes what should happen and hand the description to a runtime. Timeouts, retries, logging, and dependency injection become policies you declare up front rather than statements scattered through the body.
 
 ```typescript
 import { Effect } from 'effect';
@@ -347,15 +446,15 @@ const makePayment = (data: unknown) =>
 
 **The Mental Model: The Blueprint Factory**
 
-Picture this: You're designing a factory, but you don't actually build anything. Instead, you create incredibly detailed blueprints that specify:
+You design a factory and build none of it. You produce detailed blueprints specifying:
 
 - What machines you need (dependencies)
 - How long each process should take (timeouts)
 - What to do when machines break (retries, circuit breakers)
-- How all the pieces fit together (composition)
+- How the pieces fit together (composition)
 - What should be logged and when (observability)
 
-The upside: you can test the blueprint without building the factory. You can swap out machine specifications without changing the blueprint. You can simulate failures and see how the system responds.
+You can test the blueprint without building the factory, swap machine specifications without redrawing it, and simulate failures to watch how the system responds.
 
 ```mermaid
 flowchart TD
@@ -395,17 +494,17 @@ flowchart TD
     end
 ```
 
-Then you hand the blueprint to a runtime engineer who actually builds and operates the factory.
+Then you hand the blueprint to a runtime engineer who builds and operates the factory.
 
 **When to use this:**
 
-Use Effect when you need sophisticated orchestration patterns (retries, timeouts, circuit breakers), when testability is critical, when you want consistent policies across your entire application, or when your team has bandwidth to learn functional programming concepts.
+Choose Effect when you need orchestration patterns like retries, timeouts, and circuit breakers across the whole application, when swappable services drive your testing strategy, or when your team has room to learn functional programming concepts.
 
 **Why you might want this:**
 
-**Policies become first-class citizens**
+**Policies become first-class**
 
-Want to retry with exponential backoff? That's not scattered implementation code: that's a policy you declare once and reuse everywhere:
+Declare exponential backoff once and reuse it:
 
 ```typescript
 // (Imports omitted for brevity: Schedule, Layer, etc.)
@@ -421,9 +520,35 @@ const program = callProvider.pipe(
 );
 ```
 
-**Testing becomes straightforward**
+Because the policy is data in the pipe, `pnpm analyze:effect` reads it back out. This is the analyzer's drawing of `callProvider` in [`effect-version.test.ts`](./src/effect-version.test.ts):
 
-Same program, different reality:
+```mermaid
+flowchart LR
+  N0_Op[Operation] -->|within| N0_T[timeout: 2000ms]
+  N0_T -->|exceeded| N0_Fail((Timeout))
+  N1_Op[Operation] -->|fail| N1_R{Retry}
+  N1_R -->|"custom"| N1_Op
+  N1_R -->|exhausted| N1_Fail((Failure))
+  style N0_T fill:#e67e22,stroke:#d35400,color:#fff
+  style N0_Fail fill:#e74c3c,stroke:#c0392b,color:#fff
+  style N1_R fill:#9b59b6,stroke:#8e44ad,color:#fff
+  style N1_Fail fill:#e74c3c,stroke:#c0392b,color:#fff
+```
+
+And the same tool draws the whole `createPaymentEffect` program as a railway, with the error channel of each step on the `err` edges:
+
+```mermaid
+flowchart LR
+  A["parseInput"] -->|ok| B["checkExistingPayment"]
+  B -->|ok| C["acquireLock"]
+  C -->|ok| D["callProvider"]
+  D -->|ok| Done((Success))
+  A -->|err| AE["ValidationError"]
+  C -->|err| CE["IdempotencyConflict"]
+  D -->|err| DE["ProviderSoftFail / ProviderHardFail / ProviderUnavailable / TimeoutError"]
+```
+
+**Testing swaps the world, not the program**
 
 ```typescript
 // Production: real database, real payment provider
@@ -436,23 +561,26 @@ const testLayer = Layer.merge(DbService.test, ProviderService.mock);
 await Effect.runPromise(program.pipe(Effect.provide(testLayer)));
 ```
 
-**Everything composes consistently**
+**Everything composes the same way**
 
-Same retry logic everywhere. Consistent error handling across your entire app. Want to add tracing? Add it once, get it everywhere.
+One retry policy, one error-handling style, application-wide. Adding tracing once gives you tracing everywhere.
+
+**What adopting Effect asks of you**
+
+Effect is a runtime rather than a library, so it rewards commitment: the value compounds as more of your call graph moves into it. Plan the adoption rather than sprinkling it, and you get a great deal back.
+
+If you start today: v4 has reached release candidate, and this repo's Effect examples typecheck against `effect@4.0.0-rc.112`. Getting here took real edits. `Effect.catchAll` became `Effect.catch`, `Effect.timeoutFail` went away in favour of `timeout` plus `mapError`, `Schedule.intersect` and `Schedule.whileInput` moved into the options object on `Effect.retry`, and `Cause` stopped exposing `_tag` and `error` on the value. Those are the shape of changes a pre-1.0 line asks for, and the rc series has been quiet by comparison: beta.107 to rc.112 needed no source changes here. Pin your version and read the changelog on each bump.
 
 ---
 
-### 🎼 The Orchestrator (Awaitly)
+### 🎼 Awaitly (Results first, workflows optional)
 
-"Let me write familiar async/await code with the type safety of Result types"
+Awaitly starts as a Result library. Each function returns `ok(value)` or `err(error)`, with no workflow wrapper.
 
-What if you could write code that looks like async/await (familiar to everyone) but with the type safety of Result types? What if your functions were honest about failure, but you didn't have to learn monadic chains or generator syntax?
-
-Welcome to Awaitly, where `step()` unwraps Results and exits early on error, automatically.
+**Level 1: plain Results**
 
 ```typescript
-import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, type AsyncResult } from 'awaitly';
 
 const validatePayment = async (data: unknown): AsyncResult<Payment, ValidationError> =>
   isValid(data) ? ok(parsePayment(data)) : err(new ValidationError('Invalid'));
@@ -462,28 +590,63 @@ const chargeCustomer = async (payment: Payment): AsyncResult<ChargeResult, Payme
 
 const saveToDatabase = async (result: ChargeResult): AsyncResult<void, DatabaseError> =>
   ok(undefined);
-
-// Clean imperative workflow with run()
-const result = await run(async ({ step }) => {
-  const payment = await step('validatePayment', () => validatePayment(data)); // Unwraps Result, exits early on error
-  const charge = await step('chargeCustomer', () => chargeCustomer(payment)); // Only runs if validation succeeded
-  await step('saveToDatabase', () => saveToDatabase(charge));                  // Only runs if charge succeeded
-  return { success: true };
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
-
-// result.ok: true → result.value: { success: true }
-// result.ok: false → result.error: ValidationError | PaymentError | DatabaseError | UnexpectedError
 ```
 
-For complex workflows needing caching, resume state, or automatic error inference:
+That is the whole of Level 1, and it costs 1.34 KB gzipped from `awaitly/result`. Stop here if it covers you.
+
+**Level 2: composition with manual checks (or sync combinators)**
 
 ```typescript
-import { createWorkflow } from 'awaitly/workflow';
+import { ok, type AsyncResult, type ErrorsOf } from 'awaitly';
+
+const deps = { validatePayment, chargeCustomer, saveToDatabase };
+type PaymentErrors = ErrorsOf<typeof deps>;
+
+const processPayment = async (
+  data: unknown,
+): AsyncResult<{ success: true }, PaymentErrors> => {
+  const paymentResult = await deps.validatePayment(data);
+  if (!paymentResult.ok) return paymentResult;
+
+  const chargeResult = await deps.chargeCustomer(paymentResult.value);
+  if (!chargeResult.ok) return chargeResult;
+
+  const saveResult = await deps.saveToDatabase(chargeResult.value);
+  if (!saveResult.ok) return saveResult;
+
+  return ok({ success: true as const });
+};
+```
+
+Sync `andThen` and `map` apply to sync `Result` values, where the callback returns `Result` rather than `AsyncResult`.
+
+**Level 3: `run(deps, fn)` for early exit without manual checks**
+
+```typescript
+import { run } from 'awaitly';
+
+const result = await run(
+  { validatePayment, chargeCustomer, saveToDatabase },
+  async (s) => {
+    const payment = await s.validatePayment(data);
+    const charge = await s.chargeCustomer(payment);
+    await s.saveToDatabase(charge);
+    return { success: true };
+  },
+);
+
+// result.error: ValidationError | PaymentError | DatabaseError | UnexpectedError
+```
+
+Reach for `createWorkflow()` when you need caching, resume state, or named production workflows:
+
+```typescript
+import { createWorkflow } from 'awaitly';
 
 // Declare dependencies → error union computed automatically
 const makePayment = createWorkflow('makePayment', { validatePayment, chargeCustomer, saveToDatabase });
 
-const result = await makePayment(async ({ step, deps }) => {
+const result = await makePayment.run(async ({ step, deps }) => {
   const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' }); // Cached
   const charge = await step('chargeCustomer', () => deps.chargeCustomer(payment), { key: 'charge' });
   await step('saveToDatabase', () => deps.saveToDatabase(charge), { key: 'save' });
@@ -494,14 +657,14 @@ const result = await makePayment(async ({ step, deps }) => {
 // ↑ Computed automatically from { validatePayment, chargeCustomer, saveToDatabase }
 ```
 
-**Why caching/resume matters (especially for payments):**
+**Why caching and resume matter for payments**
 
-The scariest failure mode is "provider charge succeeded, but persistence failed." If you retry the whole workflow naïvely, you risk charging the customer twice. With step keys, you can safely resume without repeating side effects.
+If the provider charge succeeds and persistence fails, a naive retry charges the customer twice. Step keys let you resume without repeating side effects.
 
 ```typescript
 const makePayment = createWorkflow('makePayment', { validatePayment, callProvider, persistSuccess });
 
-const result = await makePayment(async ({ step, deps }) => {
+const result = await makePayment.run(async ({ step, deps }) => {
   const payment = await step('validatePayment', () => deps.validatePayment(data), { key: 'validate' });
 
   // Never repeat this once it succeeds:
@@ -516,115 +679,67 @@ const result = await makePayment(async ({ step, deps }) => {
 });
 ```
 
-**The Mental Model: The Conductor**
-
-Picture this: You're a conductor leading an orchestra. You don't need to know how each musician plays their instrument. You just need to know what instruments you have available, and you can compose a symphony.
-
-The key benefit: the sheet music (your workflow) automatically documents all the ways the performance could go wrong. If the violinist is sick? The error type tells you exactly what happened. If the drummer misses a beat? You know immediately which instrument failed.
+The full version of that workflow lives in [`workflow-version.test.ts`](./src/workflow-version.test.ts), and `pnpm analyze:awaitly` draws it from the source. You never redraw it:
 
 ```mermaid
-flowchart TD
-    subgraph "Awaitly: Step-by-Step Execution"
-        subgraph "Happy Path (step() unwraps Results)"
-            S1["🎬 step(validatePayment)"]
-            S2["🎬 step(checkExisting)"]
-            S3["🎬 step(acquireLock)"]
-            S4["🎬 step(callProvider)"]
-            S5["🎬 step(persistSuccess)"]
-            S6["🎉 Success!"]
-            S1 -->|"ok"| S2
-            S2 -->|"ok"| S3
-            S3 -->|"ok"| S4
-            S4 -->|"ok"| S5
-            S5 -->|"ok"| S6
-        end
+flowchart TB
 
-        subgraph "Early Exit (automatic on error)"
-            E1["❌ ValidationError"]
-            E2["❌ IdempotencyConflict"]
-            E3["❌ ProviderUnavailable"]
-            E4["❌ PersistError"]
-            EXIT["🛑 Workflow Exits"]
-        end
 
-        S1 -.error.-> E1
-        S2 -.error.-> E2
-        S3 -.error.-> E2
-        S4 -.error.-> E3
-        S5 -.error.-> E4
-        
-        E1 --> EXIT
-        E2 --> EXIT
-        E3 --> EXIT
-        E4 --> EXIT
-    end
+  start((Start))
+  step_1["validateInput"]
+  err_step_1_VALIDATION_ERROR["VALIDATION_ERROR"]
+  step_2["findExisting"]
+  step_3["acquireLock"]
+  err_step_3_IDEMPOTENCY_CONFLICT["IDEMPOTENCY_CONFLICT"]
+  step_4["callProvider (FromResult)"]
+  err_step_4_PROVIDER_HARD_FAIL["PROVIDER_HARD_FAIL"]
+  err_step_4_PROVIDER_UNAVAILABLE["PROVIDER_UNAVAILABLE"]
+  step_5["persistSuccess"]
+  err_step_5_PERSIST_ERROR["PERSIST_ERROR"]
+  end_node((End))
+
+  step_1 -->|VALIDATION_ERROR| err_step_1_VALIDATION_ERROR
+  step_1 --> step_2
+  step_3 -->|IDEMPOTENCY_CONFLICT| err_step_3_IDEMPOTENCY_CONFLICT
+  step_2 --> step_3
+  step_4 -->|PROVIDER_HARD_FAIL| err_step_4_PROVIDER_HARD_FAIL
+  step_4 -->|PROVIDER_UNAVAILABLE| err_step_4_PROVIDER_UNAVAILABLE
+  step_3 --> step_4
+  step_5 -->|PERSIST_ERROR| err_step_5_PERSIST_ERROR
+  step_4 --> step_5
+  start --> step_1
+  step_5 --> end_node
 ```
 
-```mermaid
-flowchart TD
-    subgraph "Awaitly: Dependency-Declared Orchestration"
-        subgraph "1. Declare Dependencies"
-            D1["🎼 validatePayment"]
-            D2["🎼 chargeCustomer"]
-            D3["🎼 saveToDatabase"]
-        end
+Each step is a node and each error a labelled edge, so the review question "what happens when the lock is held" has an answer before you open the function body.
 
-        subgraph "2. Automatic Inference"
-            I1["🔍 Extract error types"]
-            I2["🔗 Union: ValidationError | PaymentError | DatabaseError"]
-            I3["✅ Type-safe error handling"]
-        end
+**When to use each level:**
 
-        subgraph "3. Execute with step()"
-            E1["🎬 step(validatePayment)"]
-            E2["🎬 step(chargeCustomer)"]
-            E3["🎬 step(saveToDatabase)"]
-            E4["✅ Early exit on error"]
-        end
+| Level | API | Use when |
+|-------|-----|----------|
+| 1 | `ok`/`err`, `AsyncResult` | You want typed errors like neverthrow |
+| 2 | Manual checks + `ErrorsOf`, or `run(deps, fn)` | You want composition without workflows |
+| 3 | `createWorkflow()`, `durable` | You need caching, resume, or production orchestration |
 
-        D1 --> I1
-        D2 --> I1
-        D3 --> I1
-        I1 --> I2 --> I3
-        I3 --> E1 --> E2 --> E3
-        E1 -.error.-> E4
-        E2 -.error.-> E4
-        E3 -.error.-> E4
-    end
-```
+**Level 2 in one sentence**
 
-**When to use this:**
-
-Use Awaitly when you want the type safety of Result types with the familiar syntax of async/await, when you need automatic error type inference, when you need retries and timeouts without the complexity of Effect, or when you're building workflows that benefit from step caching and resume state.
-
-**Two APIs for different needs:**
-
-| API | Use Case | Error Types | Features |
-|-----|----------|-------------|----------|
-| `run()` | Simple workflows | Manual or inferred | Lightweight, no deps |
-| `createWorkflow()` | Complex workflows | Auto-inferred from deps | Caching, resume, HITL |
-
-**Why you might want this:**
-
-**Async/await with automatic error propagation**
-
-Write normal async/await code, and `step()` handles early-exit error propagation for you.
+Write ordinary async/await code, and bound steps unwrap Results and exit early on error.
 
 ```typescript
-const result = await run(async ({ step }) => {
-  const user = await step('getUser', () => fetchUser('1'));
-  const posts = await step('getPosts', () => fetchPosts(user.id));
+const result = await run({ fetchUser, fetchPosts }, async (s) => {
+  const user = await s.fetchUser('1');
+  const posts = await s.fetchPosts(user.id);
   return { user, posts };
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+});
 ```
 
-**Early exit is automatic**
+**Early exit comes free**
 
-`step()` unwraps Results. If it's an error, the execution exits immediately. No need to check `.isErr()` everywhere. The happy path stays clean and readable.
+`step()` unwraps Results and exits on the first error, so you skip the `.isErr()` check after every line and the happy path stays readable.
 
-**Handle throwing operations with step.try()**
+**Wrap throwing code with step.try()**
 
-For operations that might throw (like wrapping existing APIs), use `step.try()` to convert exceptions to typed errors:
+For operations that throw, such as third-party APIs, `step.try()` converts exceptions into typed errors:
 
 ```typescript
 const response = await step.try('riskyOp', () => riskyOperation(), {
@@ -632,9 +747,9 @@ const response = await step.try('riskyOp', () => riskyOperation(), {
 });
 ```
 
-**Automatic error inference with createWorkflow**
+**createWorkflow infers the error union**
 
-You declare your functions, and the error union is computed automatically. Add a new function? The error types update automatically. Remove one? TypeScript ensures you handle the new error set.
+Declare your functions and Awaitly computes the union. Add a function and the error type widens. Remove one and TypeScript points at the handler you no longer need.
 
 ```typescript
 const workflow = createWorkflow('workflow', { fetchUser, fetchPosts, sendEmail });
@@ -644,11 +759,9 @@ const workflow = createWorkflow('workflow', { fetchUser, fetchPosts, sendEmail }
 
 **Step caching and resume state**
 
-Expensive operations can be cached by key. Workflows can be paused and resumed. Perfect for long-running processes or human-in-the-loop workflows.
+Cache expensive operations by key, and pause and resume workflows. Long-running jobs and human-in-the-loop flows need this.
 
-**Retries and timeouts built-in**
-
-Awaitly includes production-ready scheduling without needing a separate library:
+**Retries and timeouts are built in**
 
 ```typescript
 // Retry with exponential backoff
@@ -666,97 +779,58 @@ const data = await step.withTimeout(
 );
 ```
 
-Pre-built policies are available for common patterns:
+Pre-built policies cover the common cases:
 
 ```typescript
-import { retryPolicies, timeoutPolicies } from 'awaitly/policies';
+import { retryPolicies, timeoutPolicies } from 'awaitly';
 
 const user = await step.retry('fetchUser', () => fetchUser(id), retryPolicies.transient);
 ```
 
 **Streaming with Results**
 
-Awaitly v1.11.0 introduces `awaitly/streaming` for processing data streams with Result types and backpressure handling:
+`awaitly/durable` exposes Result-aware stream processing:
 
 ```typescript
-import { createMemoryStreamStore, map, filter, chunk, collect } from 'awaitly/streaming';
+import { createWorkflow } from 'awaitly';
+import { createMemoryStreamStore, pipe, map, filter, chunk } from 'awaitly/durable';
 
-// Create a stream store for workflow integration
-const store = createMemoryStreamStore<string>();
+// The stream store is a workflow option; step.getReadable() reads from it
+const streamStore = createMemoryStreamStore();
 
-await run(async ({ step }) => {
-  const writable = await step.getWritable(store, { key: 'output' });
+const job = createWorkflow('processLines', { saveBatch }, { streamStore });
 
-  // Transform stream with Result-aware operators
-  const processed = writable
-    .pipeThrough(map((line) => ok(line.toUpperCase())))
-    .pipeThrough(filter((line) => line.length > 0))
-    .pipeThrough(chunk(100));
+await job.run(async ({ step, deps }) => {
+  const reader = step.getReadable<string>({ namespace: 'input' });
 
-  // Collect all results
-  const results = await step('collect', () => collect(processed));
-  return results;
+  // Transformers are data-first over async iterables: pipe(source, ...stages)
+  const batches = pipe(
+    reader,
+    (s) => map(s, (line) => line.toUpperCase()),
+    (s) => filter(s, (line) => line.length > 0),
+    (s) => chunk(s, 100)
+  );
+
+  let total = 0;
+  for await (const batch of batches) {
+    await step('saveBatch', () => deps.saveBatch(batch), { key: `batch:${total}` });
+    total += batch.length;
+  }
+
+  return { total };
 });
 ```
 
-**Functional Utilities (pipe/flow)**
+**Result composition and fetch boundaries**
 
-For teams who want Effect-style composition without the full ecosystem, `awaitly/functional` provides familiar utilities:
-
-```typescript
-import { pipe, flow, R } from 'awaitly/functional';
-
-// pipe: Apply functions left-to-right to a value
-const result = pipe(
-  input,
-  R.map((x) => x * 2),
-  R.filter((x) => x > 10),
-  R.andThen((x) => fetchData(x))
-);
-
-// flow: Create reusable pipelines
-const processUser = flow(
-  validateUser,
-  R.andThen(enrichUser),
-  R.mapError(toApiError)
-);
-
-const result = await processUser(userData);
-```
-
-**Type-Safe Fetch**
-
-The `awaitly/fetch` module provides type-safe HTTP operations with built-in error types:
-
-```typescript
-import { fetchJson, fetchText } from 'awaitly/fetch';
-
-// Built-in error types: NOT_FOUND, BAD_REQUEST, UNAUTHORIZED, FORBIDDEN, SERVER_ERROR, NETWORK_ERROR
-const result = await fetchJson<User>('https://api.example.com/users/1');
-
-if (!result.ok) {
-  switch (result.error.type) {
-    case 'NOT_FOUND': return handleNotFound();
-    case 'NETWORK_ERROR': return handleNetworkError();
-  }
-}
-
-// Custom error mapping
-const customResult = await fetchJson<User>(url, {
-  mapError: (status, body) => {
-    if (status === 404) return { type: 'USER_NOT_FOUND', userId: body.id };
-    return { type: 'API_ERROR', status };
-  }
-});
-```
+Awaitly keeps the public surface small. Result combinators such as `map`, `andThen`, and `allAsync` come from `awaitly`, while HTTP calls use the platform's `fetch` wrapped with `tryAsync`, so your application owns its domain error model.
 
 **step.sleep() with Duration Support**
 
-Cancellation-aware delays with human-readable duration strings:
+Cancellation-aware delays that read as durations:
 
 ```typescript
-import { run } from 'awaitly/run';
-import { seconds, minutes } from 'awaitly/duration';
+import { run, seconds, minutes } from 'awaitly';
 
 await run(async ({ step }) => {
   // String duration syntax (ID first, then duration)
@@ -780,39 +854,37 @@ await run(async ({ step }) => {
 
 ## Which One Should I Choose?
 
-Here's the honest truth: **it depends on what you're building**.
+It depends on what you're building.
 
 ### Start with try/catch if:
 
-- You're building something simple with straightforward error handling
-- Your team is learning JavaScript/TypeScript fundamentals
-- You need to ship quickly and iteration speed matters more than compile-time safety
-- You're working at system boundaries (HTTP handlers, event listeners) where you need to catch unexpected errors and return an appropriate HTTP response
+- You're building something small with straightforward failure handling
+- Your team is learning JavaScript and TypeScript fundamentals
+- Shipping speed matters more to you than compile-time safety
+- You're writing a system boundary such as an HTTP handler or event listener
 
 ### Consider neverthrow when:
 
-- Your business logic has multiple failure modes that need different handling
-- You want the compiler to verify that you've handled all error cases
-- You're tired of forgetting to catch exceptions and discovering them in production
-- You need composable error handling that works well with functional patterns
+- Your business logic has failure modes that need different handling
+- You want the compiler to check that you handled every case
+- You keep forgetting to catch exceptions and finding them in production
+- Method chaining suits how your team already writes code
 
 ### Look at Effect when:
 
-- You need the full ecosystem (dependency injection, layers, structured concurrency, tracing)
-- Testability is critical and you want pure dependency injection with swappable services
-- You want consistent policies applied uniformly via layers across your entire application
-- Your team has capacity to learn functional programming concepts and advanced abstractions
+- You need the full ecosystem: dependency injection, layers, structured concurrency, fibers
+- Swappable services drive your testing strategy
+- You want one set of policies applied through layers across the application
+- Your team has room to learn functional programming concepts and to track v4 while it stabilises
 
 ### Consider Awaitly when:
 
-- You want Result types with familiar async/await syntax
-- You want the compiler to verify that you've handled all error cases
-- You're tired of forgetting to catch exceptions and discovering them in production
-- You need automatic error type inference from declared functions
-- You need retries, timeouts, and backoff without adopting Effect's ecosystem
-- You're building workflows that benefit from step caching or resume state
-- You want type-safe error handling without the learning curve of Effect
-- Your team knows async/await but wants better error handling than try/catch
+- You want typed Results with `ok`/`err` and nothing else yet (Level 1, 1.34 KB)
+- Your team writes async/await and you want to keep it
+- You're migrating from promises and want to convert one function at a time
+- You need error inference, step caching, or resume later without switching libraries
+- You want retries, timeouts, and circuit breakers without adopting Effect's runtime
+- Bundle size is a constraint you have to defend
 
 ## The Decision Tree
 
@@ -820,52 +892,43 @@ Here's the honest truth: **it depends on what you're building**.
 flowchart TD
     Start([Need to handle errors?]) --> Simple{Simple use case?}
 
-    Simple -->|Yes| TryCatch[🎭 try/catch]
-    Simple -->|No| Complex{Complex business logic?}
+    Simple -->|Yes| TryCatch[try/catch]
+    Simple -->|No| NeedResults{Need typed Results?}
 
-    Complex -->|Yes| WantAutoInference{Want auto error inference?}
-    Complex -->|No| Neverthrow[🚂 neverthrow]
+    NeedResults -->|Yes| PreferChains{Prefer method chaining?}
+    NeedResults -->|No| Effect[Effect]
 
-    WantAutoInference -->|Yes| FamiliarSyntax{Want async/await syntax?}
-    WantAutoInference -->|No| NeedsPolicies{Need timeouts, retries, etc?}
+    PreferChains -->|Yes| Neverthrow[neverthrow]
+    PreferChains -->|No| AwaitlyL1[Awaitly Level 1 or 2]
 
-    FamiliarSyntax -->|Yes| NeedStreaming{Need streaming?}
-    FamiliarSyntax -->|No| Neverthrow
+    AwaitlyL1 --> NeedOrchestration{Need caching, resume, or inference?}
+    NeedOrchestration -->|Yes| AwaitlyL3[Awaitly Level 3]
+    NeedOrchestration -->|No| AwaitlyL1
 
-    NeedStreaming -->|Yes| awaitly[🎼 Awaitly]
-    NeedStreaming -->|No| WantFunctional{Want Effect-like<br/>functional style?}
+    AwaitlyL1 --> NeedPolicies{Need policies beyond Results?}
+    NeedPolicies -->|Yes| TeamReady{Team ready for FP?}
+    NeedPolicies -->|No| AwaitlyL1
 
-    WantFunctional -->|Yes| awaitly
-    WantFunctional -->|No| awaitly
+    TeamReady -->|Yes| NeedFibers{Need fibers and structured concurrency?}
+    TeamReady -->|No| AwaitlyL3
 
-    NeedsPolicies -->|Yes| TeamReady{Team ready for<br/>FP learning curve?}
-    NeedsPolicies -->|No| Neverthrow
+    NeedFibers -->|Yes| Effect
+    NeedFibers -->|No| AwaitlyL3
 
-    TeamReady -->|Yes| NeedFibers{Need fibers &<br/>structured concurrency?}
-    TeamReady -->|No| awaitly
+    TryCatch --> TryCatchGood["Simple cases, hidden errors"]
 
-    NeedFibers -->|Yes| Effect[🏗️ Effect]
-    NeedFibers -->|No| awaitly
+    Neverthrow --> NeverthrowGood["Explicit errors, manual unions"]
 
-    TryCatch --> TryCatchGood[✅ Perfect for simple cases<br/>✅ Everyone knows it<br/>❌ Gets messy with complexity]
+    AwaitlyL1 --> AwaitlyL1Good["ok/err and combinators, no workflows"]
 
-    Neverthrow --> NeverthrowGood[✅ Explicit error handling<br/>✅ Great composability<br/>❌ Manual error unions]
+    AwaitlyL3 --> AwaitlyL3Good["run, createWorkflow, durable"]
 
-    awaitly --> awaitlyGood[✅ Familiar async/await<br/>✅ Streaming, pipe/flow, fetch<br/>✅ ESLint plugin for safety]
-
-    Effect --> EffectGood[✅ Most powerful ecosystem<br/>✅ Structured concurrency<br/>❌ Steep learning curve]
-
-    style TryCatch fill:#FFE4B5
-    style Neverthrow fill:#E0E0E0
-    style awaitly fill:#E8F5E9
-    style Effect fill:#E6E6FA
+    Effect --> EffectGood["Full ecosystem, steep learning curve"]
 ```
 
-**In practice, most systems mix styles:** try/catch at boundaries, explicit Results in core workflows, and policy-driven orchestration only where it pays off. Don't force a single hammer.
+Most production systems mix styles: try/catch at boundaries, explicit Results in core workflows, and policy-driven orchestration where it earns its keep. Mixing is a sign of good judgement rather than indecision, so pick per layer instead of picking once for the whole codebase.
 
 ## A Simple Example: Division
-
-Let's see how each approach handles a simple division function:
 
 ```typescript
 // throwing approach (caught at the boundary)
@@ -893,34 +956,48 @@ const divideEffect = (a: number, b: number) =>
 ```
 
 ```typescript
-// Awaitly approach
+// Awaitly approach (Level 1: plain Results, no workflow)
 import { ok, err, type Result } from 'awaitly';
-import { run } from 'awaitly/run';
 
-const divideWorkflow = (a: number, b: number): Result<number, Error> =>
-  b === 0 ? err(new Error('Division by zero')) : ok(a / b);
+function divideAwaitly(a: number, b: number): Result<number, Error> {
+  return b === 0 ? err(new Error('Division by zero')) : ok(a / b);
+}
 
-const result = await run(async ({ step }) => {
-  const x = await step('divide', () => divideWorkflow(10, 2)); // 5
-  return x;
-});
-
+const result = divideAwaitly(10, 2);
 // result.ok ? result.value : result.error
+
+// For multi-step flows, add run() or andThen at Level 2/3. Not required here.
 ```
 
-Notice how the function signatures tell different stories:
+The signatures tell four different stories:
 
 - try/catch: `number` (lies about potential failure)
 - neverthrow: `Result<number, Error>` (honest about what can happen)
 - Effect: `Effect<number, Error, never>` (describes a computation that might fail)
-- Awaitly: `Result<number, Error>` (honest types, composed with `step()`)
+- Awaitly: `Result<number, Error>` (honest types, same as neverthrow at Level 1)
+
+## Seeing the Code Without Running It
+
+Two of the four approaches ship a static analyzer that reads your source with the TypeScript checker and emits diagrams, plain-English walkthroughs, and JSON. `awaitly-analyze` maps a workflow's steps and error edges. `effect-analyze` maps an Effect program's services, error channel, and concurrency, and its project modes report on the whole directory: `--error-channel` counts every error type in `src` and finds programs that widened theirs to `Error`, and `--lint-source` runs a deterministic rule set with baselines and SARIF output.
+
+```bash
+pnpm analyze:awaitly   # workflow diagram, generated from the code that runs
+pnpm analyze:explain   # plain-English walkthrough of each Effect program
+pnpm analyze:audit     # project-wide Effect adoption audit
+pnpm analyze:errors    # every error type in src, and where none is handled
+pnpm analyze:lint      # deterministic source lints across src
+pnpm analyze:check     # CI gate: fail if a diagram is not deterministic
+```
+
+Both matter for review (the failure paths show up as labelled edges) and for AI coding assistants (a dozen lines of diagram carry the control flow that would otherwise cost you the whole file in context). See **[static-analysis.md](./src/comparison/static-analysis.md)** for real output from this repo.
 
 ## Want to Learn More?
 
-- 📖 **[ADVANCED.md](./ADVANCED.md)** - Deep dive into implementation details, migration strategies, and performance considerations
+- 📖 **[ADVANCED.md](./ADVANCED.md)** - Implementation details, migration strategies, and performance considerations
+- 🔍 **[static-analysis.md](./src/comparison/static-analysis.md)** - Diagrams and docs generated from the source, for humans and AI assistants
 - 🔌 **[Integration Guides](./src/integrations/)** - Using Awaitly with Zod, Prisma, React Query, and more
-- 💻 **[src/](./src/)** - Complete working examples of all four approaches
-- 🧪 **Run the examples** - `npm install && npm test` to see them in action
+- 💻 **[src/](./src/)** - Working examples of all four approaches
+- 🧪 **Run the examples** - `pnpm install && pnpm test`
 
 ### Integration Guides
 
@@ -933,17 +1010,12 @@ Awaitly works alongside your existing libraries:
 | **React Query** | [react-query.md](./src/integrations/react-query.md) | Server state with Result types |
 | **neverthrow** | [neverthrow-migration.md](./src/integrations/neverthrow-migration.md) | Gradual migration path |
 
-## The Uncomfortable Truth
+## Choosing
 
-Here's what I've learned after years of building systems that break in creative ways:
+Design for failure before you write the happy path. We all ship bugs, and what experience teaches you is to decide up front what happens when a step falls over, so failure has somewhere to go.
 
-**Errors aren't bugs: they're features.** The difference between a junior developer and a senior developer isn't that the senior writes bug-free code. It's that the senior developer has learned to design around the inevitable failure.
+You have a rubric now: **Visible, Composable, Honest**. Pick the trade-off you can live with, and remember that at 3 AM you will want code you can read.
 
-You already have a rubric now: **Visible, Composable, Honest**.  
-Pick the trade-off you're willing to live with: at 3 AM, you won't care what was "elegant." You'll care what was **understandable**.
+Every option here is a good answer to a real question. try/catch keeps things simple and is the right call more often than library authors like to admit. neverthrow gives you composable typed errors in a small, focused package. Awaitly Level 1 covers the same ground in async/await, with workflows waiting for the day caching or resume starts to matter. Effect gives you an architectural toolkit nothing else on this list can match, if you have room for its runtime.
 
-**There's no "correct" choice here.** Each approach is a tool. Use try/catch when you need simplicity. Use neverthrow when you need composability. Use Awaitly when you want automatic error inference with familiar syntax. Use Effect when you need the full architectural toolkit.
-
-But whatever you choose, choose deliberately. Don't just throw try/catch around everything and hope for the best. And don't pick Effect just because it sounds impressive on your resume.
-
-Your future self (the one being woken up at 3 AM because payments are down) will thank you for thinking this through.
+Choose on purpose, and be kind to whoever reads it next. That might be you at 3 AM.

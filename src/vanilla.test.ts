@@ -208,7 +208,7 @@ const makeDb = (): Db => {
           existing[p.idemKey] = { id: p.providerPaymentId };
         },
         insertAudit: async () => {},
-      } as any),
+      }),
   };
 };
 
@@ -264,7 +264,7 @@ describe('vanilla', () => {
     const db: Db = {
       ...makeDb(),
       acquireLock: async () => false,
-    } as Db;
+    };
     const provider = makeProvider();
     await expect(
       createPaymentVanilla(

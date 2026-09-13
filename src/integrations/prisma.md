@@ -4,8 +4,8 @@ Turn Prisma database errors into typed Results for exhaustive error handling.
 
 ## Why Combine Them?
 
-- **Exhaustive error handling**: Handle `NOT_FOUND`, `UNIQUE_VIOLATION`, etc. explicitly
-- **No more try/catch spaghetti**: Database operations compose cleanly in workflows
+- **Exhaustive error handling**: Handle `NOT_FOUND`, `UNIQUE_VIOLATION`, and friends by name
+- **No more try/catch spaghetti**: Database operations compose in workflows
 - **Type-safe error codes**: Prisma's error codes become typed union members
 
 ## Quick Start
@@ -13,7 +13,7 @@ Turn Prisma database errors into typed Results for exhaustive error handling.
 ```typescript
 import { Prisma } from '@prisma/client';
 import { ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 
 type DbError =
   | { type: 'NOT_FOUND' }
@@ -32,13 +32,8 @@ const findUser = async (id: string): AsyncResult<User, DbError> => {
   }
 };
 
-// Use in a workflow
-import { Awaitly } from 'awaitly';
-
-const result = await run(async ({ step }) => {
-  const user = await step('findUser', () => findUser('user-123'));
-  return user;
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+// Use with run(deps, fn)
+const result = await run({ findUser }, async (s) => s.findUser('user-123'));
 ```
 
 ## Patterns
@@ -163,8 +158,7 @@ const userRepository = {
 Combine Prisma with Zod validation:
 
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 import { zodToResult } from './zod-result';
 import { userRepository } from './user-repository';
 
@@ -175,18 +169,17 @@ const CreateUserSchema = z.object({
 });
 
 const createUser = async (rawInput: unknown) => {
-  return run(async ({ step }) => {
-    // Validate input
-    const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawInput));
+  const validateInput = () => zodToResult(CreateUserSchema, rawInput);
+  const saveUser = (input: z.infer<typeof CreateUserSchema>) =>
+    userRepository.create(input);
 
-    // Create in database
-    const user = await step('createUser', () => userRepository.create(input));
-
-    return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+  return run({ validateInput, saveUser }, async (s) => {
+    const input = await s.validateInput();
+    return s.saveUser(input);
+  });
 };
 
-// Error type is: ValidationError | EmailTakenError | DbError
+// Error type is inferred from deps: ValidationError | EmailTakenError | DbError | UnexpectedError
 ```
 
 ### Pattern 4: Transactions with Saga Pattern
@@ -194,50 +187,55 @@ const createUser = async (rawInput: unknown) => {
 Use Awaitly's saga pattern for transactions that need compensation:
 
 ```typescript
-import { createSagaWorkflow } from 'awaitly/saga';
+import { createSagaWorkflow } from 'awaitly/durable';
 
-const transferFunds = createSagaWorkflow({
-  debitAccount: async (accountId: string, amount: number) => {
-    return prismaToResult(() =>
-      prisma.account.update({
-        where: { id: accountId },
-        data: { balance: { decrement: amount } },
-      })
-    );
-  },
-  creditAccount: async (accountId: string, amount: number) => {
-    return prismaToResult(() =>
-      prisma.account.update({
-        where: { id: accountId },
-        data: { balance: { increment: amount } },
-      })
-    );
-  },
-  createTransaction: async (data: TransactionData) => {
-    return prismaToResult(() => prisma.transaction.create({ data }));
-  },
+const debitAccount = async (accountId: string, amount: number) => {
+  return prismaToResult(() =>
+    prisma.account.update({
+      where: { id: accountId },
+      data: { balance: { decrement: amount } },
+    })
+  );
+};
+const creditAccount = async (accountId: string, amount: number) => {
+  return prismaToResult(() =>
+    prisma.account.update({
+      where: { id: accountId },
+      data: { balance: { increment: amount } },
+    })
+  );
+};
+const createTransaction = async (data: TransactionData) => {
+  return prismaToResult(() => prisma.transaction.create({ data }));
+};
+
+const transferFunds = createSagaWorkflow('transferFunds', {
+  debitAccount,
+  creditAccount,
+  createTransaction,
 });
 
-const result = await transferFunds(async (ctx, deps) => {
-  // Debit source account
-  await ctx.step(
+const result = await transferFunds.run(async ({ step, deps }) => {
+  await step(
+    'debit',
     () => deps.debitAccount(sourceId, amount),
-    { compensate: () => deps.creditAccount(sourceId, amount) } // Rollback on failure
+    { compensate: () => deps.creditAccount(sourceId, amount) },
   );
 
-  // Credit destination account
-  await ctx.step(
+  await step(
+    'credit',
     () => deps.creditAccount(destId, amount),
-    { compensate: () => deps.debitAccount(destId, amount) }
+    { compensate: () => deps.debitAccount(destId, amount) },
   );
 
-  // Record transaction
-  await ctx.step(() => deps.createTransaction({
-    sourceId,
-    destId,
-    amount,
-    timestamp: new Date(),
-  }));
+  await step('record', () =>
+    deps.createTransaction({
+      sourceId,
+      destId,
+      amount,
+      timestamp: new Date(),
+    }),
+  );
 
   return { success: true };
 });
@@ -312,8 +310,8 @@ Complete workflow combining Zod validation, email checking, and user creation:
 ```typescript
 import { z } from 'zod';
 import { Prisma, PrismaClient } from '@prisma/client';
-import { Awaitly, ok, err, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, run, type AsyncResult } from 'awaitly';
+import { run } from 'awaitly';
 
 const prisma = new PrismaClient();
 
@@ -344,40 +342,42 @@ const hashPassword = async (password: string): Promise<string> => {
   return `hashed_${password}`;
 };
 
-// Sign up workflow
-const signUp = async (rawInput: unknown): AsyncResult<{ id: string; email: string; name: string }, SignUpError> => {
-  return run(async ({ step }) => {
-    // Step 1: Validate input
-    const input = await step('validateInput', () => zodToResult(SignUpSchema, rawInput));
+// Deps return Results and never throw; Prisma's unique-constraint error is
+// mapped to a domain error here rather than at the call site
+type SignUpInput = z.infer<typeof SignUpSchema>;
 
-    // Step 2: Hash password
-    const passwordHash = await hashPassword(input.password);
-
-    // Step 3: Create user (handles unique constraint)
-    const createUserResult = async (): AsyncResult<{ id: string; email: string; name: string }, EmailTakenError | DbError> => {
-      try {
-        const user = await prisma.user.create({
-          data: {
-            email: input.email,
-            passwordHash,
-            name: input.name,
-          },
-          select: { id: true, email: true, name: true },
-        });
-        return ok(user);
-      } catch (e) {
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-          return err({ type: 'EMAIL_TAKEN', email: input.email });
-        }
-        return err({ type: 'DB_ERROR', message: String(e) });
-      }
-    };
-
-    const user = await step('createUser', () => createUserResult());
-
-    return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<{ id: string; email: string; name: string }, SignUpError>;
+const createUserRow = async (
+  input: SignUpInput,
+  passwordHash: string
+): AsyncResult<{ id: string; email: string; name: string }, EmailTakenError | DbError> => {
+  try {
+    const user = await prisma.user.create({
+      data: { email: input.email, passwordHash, name: input.name },
+      select: { id: true, email: true, name: true },
+    });
+    return ok(user);
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      return err({ type: 'EMAIL_TAKEN', email: input.email });
+    }
+    return err({ type: 'DB_ERROR', message: String(e) });
+  }
 };
+
+// Sign up workflow, deps first, so the union is inferred and no cast is needed
+const signUp = (rawInput: unknown) =>
+  run(
+    {
+      validateInput: async () => zodToResult(SignUpSchema, rawInput),
+      createUserRow,
+    },
+    async (s) => {
+      const input = await s.validateInput();
+      const passwordHash = await hashPassword(input.password);
+      return await s.createUserRow(input, passwordHash);
+    }
+  );
+// signUp(...) resolves to AsyncResult<..., SignUpError | UnexpectedError>
 
 // API handler
 export const POST = async (request: Request) => {

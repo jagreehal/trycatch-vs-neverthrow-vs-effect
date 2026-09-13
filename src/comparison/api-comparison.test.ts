@@ -4,7 +4,7 @@
  * This file demonstrates pattern-by-pattern equivalents between the three libraries.
  * Each test shows the same logic implemented three ways.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // neverthrow imports
@@ -22,7 +22,7 @@ import {
 // awaitly imports
 // ─────────────────────────────────────────────────────────────────────────────
 import {
-  Awaitly,
+  AWAITLY_UNEXPECTED,
   ok,
   err,
   allAsync,
@@ -30,16 +30,15 @@ import {
   match,
   map,
   mapError,
-  andThen,
+  run,
+  createWorkflow,
   type AsyncResult,
 } from 'awaitly';
-import { run } from 'awaitly/run';
-import { createWorkflow } from 'awaitly/workflow';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // effect imports
 // ─────────────────────────────────────────────────────────────────────────────
-import { Effect } from 'effect';
+import { Effect, Cause } from 'effect';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types for examples
@@ -81,8 +80,8 @@ describe('1. Basic Result construction', () => {
 
     const exit = await Effect.runPromiseExit(failure);
     expect(exit._tag).toBe('Failure');
-    if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-      expect(exit.cause.error).toBe('NOT_FOUND');
+    if (exit._tag === 'Failure') {
+      expect(Cause.squash(exit.cause)).toBe('NOT_FOUND');
     }
   });
 });
@@ -159,9 +158,9 @@ describe('2. Sequential operations', () => {
       // Error union is AUTOMATIC - inferred from deps
       const loadUserData = createWorkflow('loadUserData', { fetchUser, fetchPosts });
 
-      const result = await loadUserData(async ({ step }) => {
-        const user = await step('getUser', () => fetchUser('1'));
-        const userPosts = await step('getPosts', () => fetchPosts(user.id));
+      const result = await loadUserData.run(async ({ step, deps }) => {
+        const user = await step('getUser', () => deps.fetchUser('1'));
+        const userPosts = await step('getPosts', () => deps.fetchPosts(user.id));
         return { user, posts: userPosts };
       });
 
@@ -180,10 +179,10 @@ describe('2. Sequential operations', () => {
         fetchComments,
       });
 
-      const result = await loadEverything(async ({ step }) => {
-        const user = await step('getUser', () => fetchUser('1'));
-        const userPosts = await step('getPosts', () => fetchPosts(user.id));
-        const comments = await step('getComments', () => fetchComments(userPosts[0].id));
+      const result = await loadEverything.run(async ({ step, deps }) => {
+        const user = await step('getUser', () => deps.fetchUser('1'));
+        const userPosts = await step('getPosts', () => deps.fetchPosts(user.id));
+        const comments = await step('getComments', () => deps.fetchComments(userPosts[0].id));
         return { user, posts: userPosts, comments };
       });
 
@@ -207,7 +206,7 @@ describe('2. Sequential operations', () => {
       Promise.resolve(ok([{ id: 'c1', text: 'Great post!', postId }]));
 
     it('uses run() with step() and closure deps', async () => {
-      type LoadErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof Awaitly.UNEXPECTED_ERROR;
+      type LoadErrors = 'NOT_FOUND' | 'FETCH_ERROR' | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<{ user: User; posts: Post[] }, LoadErrors>(
         async ({ step }) => {
@@ -215,7 +214,7 @@ describe('2. Sequential operations', () => {
           const userPosts = await step('getPosts', () => fetchPosts(user.id));
           return { user, posts: userPosts };
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(true);
@@ -230,7 +229,7 @@ describe('2. Sequential operations', () => {
         | 'NOT_FOUND'
         | 'FETCH_ERROR'
         | 'COMMENTS_ERROR'
-        | typeof Awaitly.UNEXPECTED_ERROR;
+        | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<
         { user: User; posts: Post[]; comments: Comment[] },
@@ -244,7 +243,7 @@ describe('2. Sequential operations', () => {
           );
           return { user, posts: userPosts, comments };
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(true);
@@ -370,7 +369,7 @@ describe('3. Error type inference', () => {
         createUser,
       });
 
-      const result = await signUp(async ({ step, deps }) => {
+      const result = await signUp.run(async ({ step, deps }) => {
         const email = await step('validateEmail', () => deps.validateEmail('alice@example.com'));
         const password = await step('validatePassword', () => deps.validatePassword('securepass123'));
         return await step('createUser', () => deps.createUser(email, password));
@@ -379,7 +378,7 @@ describe('3. Error type inference', () => {
       expect(result.ok).toBe(true);
 
       // Error handling with full type safety
-      const badResult = await signUp(async ({ step, deps }) => {
+      const badResult = await signUp.run(async ({ step, deps }) => {
         const email = await step('validateEmail', () => deps.validateEmail('not-an-email'));
         const password = await step('validatePassword', () => deps.validatePassword('short'));
         return await step('createUser', () => deps.createUser(email, password));
@@ -395,7 +394,7 @@ describe('3. Error type inference', () => {
     });
   });
 
-  describe('workflow: run() infers errors with catchUnexpected', () => {
+  describe('awaitly: run(deps, fn) infers the error union', () => {
     const validateEmail = (email: string): AsyncResult<string, 'INVALID_EMAIL'> =>
       Promise.resolve(email.includes('@') ? ok(email) : err('INVALID_EMAIL'));
 
@@ -416,9 +415,33 @@ describe('3. Error type inference', () => {
       | 'INVALID_EMAIL'
       | 'WEAK_PASSWORD'
       | 'DB_ERROR'
-      | typeof Awaitly.UNEXPECTED_ERROR;
+      | typeof AWAITLY_UNEXPECTED;
 
-    it('run() with catchUnexpected gives typed error union', async () => {
+    it('deps-first run() needs no type parameters and no cast', async () => {
+      const deps = { validateEmail, validatePassword, createUser };
+
+      const result = await run(deps, async (s) => {
+        const email = await s.validateEmail('alice@example.com');
+        const password = await s.validatePassword('securepass123');
+        return await s.createUser(email, password);
+      });
+      // result.error hovers as the concrete union, not an opaque alias:
+      // 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'DB_ERROR' | UnexpectedError
+      expect(result.ok).toBe(true);
+
+      const badResult = await run(deps, async (s) => {
+        const email = await s.validateEmail('not-an-email');
+        const password = await s.validatePassword('short');
+        return await s.createUser(email, password);
+      });
+
+      expect(badResult.ok).toBe(false);
+      if (!badResult.ok) {
+        expect(badResult.error).toBe('INVALID_EMAIL');
+      }
+    });
+
+    it('run() with catchUnexpected still maps unexpected to your own type', async () => {
       const result = await run<User, SignUpError>(
         async ({ step }) => {
           const email = await step('validateEmail', () =>
@@ -431,7 +454,7 @@ describe('3. Error type inference', () => {
             createUser(email, password)
           );
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(true);
@@ -448,13 +471,13 @@ describe('3. Error type inference', () => {
             createUser(email, password)
           );
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(badResult.ok).toBe(false);
       if (!badResult.ok) {
         expect(['INVALID_EMAIL', 'WEAK_PASSWORD', 'DB_ERROR']).toContain(
-          badResult.error.type ?? badResult.error
+          badResult.error
         );
       }
     });
@@ -548,7 +571,7 @@ describe('4. Wrapping throwing code', () => {
     it('wraps throwing code with typed error', async () => {
       const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         return await step('wrappedRiskyOp', () => deps.wrappedRiskyOp(false));
       });
 
@@ -559,7 +582,7 @@ describe('4. Wrapping throwing code', () => {
     it('catches throws and maps to typed error', async () => {
       const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         return await step('wrappedRiskyOp', () => deps.wrappedRiskyOp(true));
       });
 
@@ -572,7 +595,7 @@ describe('4. Wrapping throwing code', () => {
       // The error gets caught and workflow continues type-safely
       const workflow = createWorkflow('wrappedRiskyOp', { wrappedRiskyOp });
 
-      const result = await workflow(async ({ step }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         // step.try catches throws and maps them to typed errors
         return await step.try('riskyOp', () => riskyOperation(true), {
           error: 'OPERATION_FAILED',
@@ -589,7 +612,7 @@ describe('4. Wrapping throwing code', () => {
 
   describe('workflow: run() with step.try()', () => {
     it('run() wraps throwing code with step.try', async () => {
-      type RunErrors = 'OPERATION_FAILED' | typeof Awaitly.UNEXPECTED_ERROR;
+      type RunErrors = 'OPERATION_FAILED' | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<string, RunErrors>(
         async ({ step }) => {
@@ -597,7 +620,7 @@ describe('4. Wrapping throwing code', () => {
             error: 'OPERATION_FAILED',
           });
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(true);
@@ -605,7 +628,7 @@ describe('4. Wrapping throwing code', () => {
     });
 
     it('run() step.try catches throws and maps to typed error', async () => {
-      type RunErrors = 'OPERATION_FAILED' | typeof Awaitly.UNEXPECTED_ERROR;
+      type RunErrors = 'OPERATION_FAILED' | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<string, RunErrors>(
         async ({ step }) => {
@@ -613,7 +636,7 @@ describe('4. Wrapping throwing code', () => {
             error: 'OPERATION_FAILED',
           });
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(false);
@@ -642,8 +665,8 @@ describe('4. Wrapping throwing code', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toBe('OPERATION_FAILED');
+      if (exit._tag === 'Failure') {
+        expect(Cause.squash(exit.cause)).toBe('OPERATION_FAILED');
       }
     });
   });
@@ -715,12 +738,12 @@ describe('5. Parallel operations', () => {
         fetchComments,
       });
 
-      const result = await loadDashboard(async ({ step, deps }) => {
+      const result = await loadDashboard.run(async ({ step, deps }) => {
         // Fetch user first
         const user = await step('getUser', () => deps.fetchUser('1'));
 
         // Then fetch posts and comments in parallel
-        const { posts, comments } = await step.parallel('Fetch posts and comments', {
+        const { posts, comments } = await step.all('Fetch posts and comments', {
           posts: () => deps.fetchPosts(user.id),
           comments: () => deps.fetchComments('p1'),
         });
@@ -737,13 +760,13 @@ describe('5. Parallel operations', () => {
     });
   });
 
-  describe('workflow: run() with step.parallel()', () => {
-    it('run() fetches user then runs step.parallel', async () => {
+  describe('workflow: run() with step.all()', () => {
+    it('run() fetches user then runs step.all', async () => {
       type RunErrors =
         | 'USER_NOT_FOUND'
         | 'POSTS_ERROR'
         | 'COMMENTS_ERROR'
-        | typeof Awaitly.UNEXPECTED_ERROR;
+        | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<
         { user: User; posts: Post[]; comments: Comment[] },
@@ -751,7 +774,7 @@ describe('5. Parallel operations', () => {
       >(
         async ({ step }) => {
           const user = await step('getUser', () => fetchUser('1'));
-          const { posts, comments } = await step.parallel(
+          const { posts, comments } = await step.all(
             'Fetch posts and comments',
             {
               posts: () => fetchPosts(user.id),
@@ -760,7 +783,7 @@ describe('5. Parallel operations', () => {
           );
           return { user, posts, comments };
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(result.ok).toBe(true);
@@ -925,12 +948,12 @@ describe('6. Collecting all errors', () => {
             validatePassword('short'),
             validateUsername('ab'),
           ],
-          { mode: 'either' }
+          { mode: 'result' }
         )
       );
 
       const errors = results
-        .map((r) => (r._tag === 'Left' ? r.left : null))
+        .map((r) => (r._tag === 'Failure' ? r.failure : null))
         .filter((e): e is 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'INVALID_USERNAME' => e !== null);
 
       expect(errors).toEqual(['INVALID_EMAIL', 'WEAK_PASSWORD', 'INVALID_USERNAME']);
@@ -984,7 +1007,7 @@ describe('7. Error recovery', () => {
     it('recovers using conditional logic with createWorkflow', async () => {
       const workflow = createWorkflow('fetchUser', { fetchUser });
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         // Get the raw result without unwrapping
         const userResult = await deps.fetchUser('999');
 
@@ -1024,13 +1047,13 @@ describe('7. Error recovery', () => {
       );
 
     it('run() with step then recover at boundary', async () => {
-      type RunErrors = 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR;
+      type RunErrors = 'NOT_FOUND' | typeof AWAITLY_UNEXPECTED;
 
       const result = await run<User, RunErrors>(
         async ({ step }) => {
           return await step('getUser', () => fetchUser('999'));
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       const user =
@@ -1040,7 +1063,7 @@ describe('7. Error recovery', () => {
     });
   });
 
-  describe('effect: Effect.catchAll() for error recovery', () => {
+  describe('effect: Effect.catch() for error recovery', () => {
     const fetchUser = (id: string): Effect.Effect<User, 'NOT_FOUND'> =>
       id === '1'
         ? Effect.succeed({ id, name: 'Alice', email: 'alice@example.com' })
@@ -1049,7 +1072,7 @@ describe('7. Error recovery', () => {
     it('recovers from errors with fallback', async () => {
       const result = await Effect.runPromise(
         fetchUser('999').pipe(
-          Effect.catchAll((error) => {
+          Effect.catch((error) => {
             if (error === 'NOT_FOUND') {
               return Effect.succeed(defaultUser);
             }
@@ -1165,8 +1188,8 @@ describe('8. Transformations', () => {
       );
 
       expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
-        expect(exit.cause.error).toEqual({
+      if (exit._tag === 'Failure') {
+        expect(Cause.squash(exit.cause)).toEqual({
           code: 'NOT_FOUND',
           message: 'User not found',
         });
@@ -1296,13 +1319,13 @@ describe('10. Workflow-only features', () => {
       );
 
     it('run() returns typed errors when using catchUnexpected', async () => {
-      type RunErrors = 'NOT_FOUND' | typeof Awaitly.UNEXPECTED_ERROR;
+      type RunErrors = 'NOT_FOUND' | typeof AWAITLY_UNEXPECTED;
 
       const okResult = await run<User, RunErrors>(
         async ({ step }) => {
           return await step('getUser', () => getUser('1'));
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(okResult.ok).toBe(true);
@@ -1312,7 +1335,7 @@ describe('10. Workflow-only features', () => {
         async ({ step }) => {
           return await step('getUser', () => getUser('999'));
         },
-        { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }
+        { catchUnexpected: () => AWAITLY_UNEXPECTED }
       );
 
       expect(errResult.ok).toBe(false);
@@ -1332,12 +1355,12 @@ describe('10. Workflow-only features', () => {
 
       const workflow = createWorkflow('flakyOperation', { flakyOperation });
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         return await step.retry('flakyOp', () => deps.flakyOperation(), {
           attempts: 5,
           backoff: 'exponential',
           initialDelay: 10,
-          retryOn: (error: unknown) => error === 'FLAKY_ERROR',
+          shouldRetry: (error) => error === 'FLAKY_ERROR',
         });
       });
 
@@ -1355,7 +1378,7 @@ describe('10. Workflow-only features', () => {
 
       const workflow = createWorkflow('slowOperation', { slowOperation });
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         return await step.withTimeout('slowOp', () => deps.slowOperation(), {
           ms: 50,
         });
@@ -1381,7 +1404,7 @@ describe('10. Workflow-only features', () => {
       const workflow = createWorkflow('expensiveOperation', { expensiveOperation }, { cache });
 
       // First run
-      await workflow(async ({ step, deps }) => {
+      await workflow.run(async ({ step, deps }) => {
         const a = await step('expensiveOp', () => deps.expensiveOperation('1'), {
           key: 'op:1',
         });
@@ -1410,7 +1433,7 @@ describe('10. Workflow-only features', () => {
         }
       );
 
-      await workflow(async ({ step, deps }) => {
+      await workflow.run(async ({ step, deps }) => {
         // Note: step_complete is emitted when a key is provided (for caching/resume)
         return await step('fetchUser', () => deps.fetchUser('1'), {
           description: 'Fetch user',
@@ -1441,7 +1464,7 @@ describe('10. Workflow-only features', () => {
         }
       );
 
-      await workflow(async ({ step, deps }) => {
+      await workflow.run(async ({ step, deps }) => {
         return await step('fetchUser', () => deps.fetchUser('1'), { description: 'Fetch user' });
       });
 
@@ -1467,7 +1490,7 @@ describe('10. Workflow-only features', () => {
         }
       );
 
-      const result = await workflow(async ({ step, deps }) => {
+      const result = await workflow.run(async ({ step, deps }) => {
         return await step('riskyOp', () => deps.riskyOp());
       });
 
@@ -1484,7 +1507,7 @@ describe('10. Workflow-only features', () => {
 // 11. STREAMING COMPARISON
 // ─────────────────────────────────────────────────────────────────────────────
 describe('11. Streaming comparison', () => {
-  describe('awaitly/streaming pattern: Result-aware transformers', () => {
+  describe('awaitly/durable pattern: Result-aware stream transformers', () => {
     // Simulated streaming utilities
     const mapStream = <T, U, E>(
       items: T[],
@@ -1579,12 +1602,9 @@ describe('12. Functional composition comparison', () => {
     });
   });
 
-  describe('awaitly/functional: pipe with R namespace', () => {
+  describe('awaitly: data-first Result combinators (local pipe/R mock)', () => {
     const validate = (x: number): AsyncResult<number, 'INVALID'> =>
       Promise.resolve(x > 0 ? ok(x) : err('INVALID'));
-
-    const double = (x: number): AsyncResult<number, never> =>
-      Promise.resolve(ok(x * 2));
 
     it('composes with pipe and R.andThen', async () => {
       const validated = await validate(5);
@@ -1674,7 +1694,7 @@ describe('13. Fetch helpers comparison', () => {
     });
   });
 
-  describe('awaitly/fetch: built-in helpers pattern', () => {
+  describe('awaitly: native fetch wrapped with tryAsync (no awaitly/fetch entry point)', () => {
     // Simulated fetchJson with error types
     type FetchError =
       | { type: 'NOT_FOUND' }
@@ -1716,8 +1736,6 @@ describe('13. Fetch helpers comparison', () => {
 
     it('supports custom error mapping', async () => {
       type User = { id: string; name: string };
-      type CustomError = { type: 'USER_NOT_FOUND'; code: number };
-
       const result = await mockFetchJson<User>('/api/users/404', {
         mapError: (status): FetchError => ({ type: 'NOT_FOUND' }),
       });

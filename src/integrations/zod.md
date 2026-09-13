@@ -4,16 +4,16 @@ Turn Zod validation errors into typed Results for seamless composition in workfl
 
 ## Why Combine Them?
 
-- **Type-safe validation errors**: Know exactly what went wrong, not just "validation failed"
+- **Type-safe validation errors**: Know which field failed and why, rather than "validation failed"
 - **Composable with other operations**: Chain validation with database calls, API requests, etc.
-- **Early exit on invalid input**: `step()` stops the workflow immediately on validation failure
+- **Early exit on invalid input**: `step()` stops the workflow at the failed validation
 
 ## Quick Start
 
 ```typescript
 import { z } from 'zod';
 import { ok, err, type Result } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 
 const UserSchema = z.object({
   email: z.string().email(),
@@ -34,13 +34,11 @@ const zodToResult = <T>(
     : err({ type: 'VALIDATION', issues: parsed.error.issues });
 };
 
-// Use in a workflow
-import { Awaitly } from 'awaitly';
+// Use with run(deps, fn)
+const validateUser = () =>
+  zodToResult(UserSchema, { email: 'test@example.com', age: 25 });
 
-const result = await run(async ({ step }) => {
-  const user = await step('validateUser', () => zodToResult(UserSchema, { email: 'test@example.com', age: 25 }));
-  return user; // User type, not unknown
-}, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+const result = await run({ validateUser }, async (s) => s.validateUser());
 ```
 
 ## Patterns
@@ -84,31 +82,28 @@ const input = zodToResult(CreateUserSchema, requestBody);
 // input: Result<CreateUserInput, ValidationError>
 ```
 
-### Pattern 2: In Workflows with step()
+### Pattern 2: With run(deps, fn)
 
 Compose validation with other operations:
 
 ```typescript
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 import { zodToResult } from './utils';
 
-import { Awaitly } from 'awaitly';
-
 const createUser = async (rawInput: unknown) => {
-  return run(async ({ step }) => {
-    // Validate input first; exits early if invalid
-    const input = await step('validateInput', () => zodToResult(CreateUserSchema, rawInput));
+  const validateInput = () => zodToResult(CreateUserSchema, rawInput);
+  const saveUser = (input: CreateUserInput) => saveToDatabase(input);
+  const sendWelcome = (email: string) => sendWelcomeEmail(email);
 
-    // Now input is typed as CreateUserInput
-    const user = await step('saveToDatabase', () => saveToDatabase(input));
-
-    await step('sendWelcomeEmail', () => sendWelcomeEmail(user.email));
-
+  return run({ validateInput, saveUser, sendWelcome }, async (s) => {
+    const input = await s.validateInput();
+    const user = await s.saveUser(input);
+    await s.sendWelcome(user.email);
     return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+  });
 };
 
-// Error type is automatically: ValidationError | DbError | EmailError
+// Error type is inferred from deps: ValidationError | DbError | EmailError | UnexpectedError
 ```
 
 ### Pattern 3: Form Validation in React
@@ -160,8 +155,7 @@ const handleSubmit = async (formData: FormData) => {
 Validate incoming API requests:
 
 ```typescript
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run, isUnexpectedError } from 'awaitly';
 import { zodToResult } from './utils';
 
 // Define request schemas
@@ -177,19 +171,26 @@ const PostIdSchema = z.object({
 
 // API handler
 export const POST = async (request: Request) => {
-  const result = await run(async ({ step }) => {
-    const body = await request.json();
+  const body = await request.json();
 
-    // Validate request body
-    const input = await step('validateInput', () => zodToResult(CreatePostSchema, body));
-
-    // Save to database
-    const post = await step('createPost', () => createPost(input));
-
-    return post;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+  // Deps first: the error union is inferred, so no type parameters and no cast
+  const result = await run(
+    {
+      validateInput: async () => zodToResult(CreatePostSchema, body),
+      createPost,
+    },
+    async (s) => {
+      const input = await s.validateInput();
+      return await s.createPost(input);
+    }
+  );
+  // result.error: ValidationError | DbError | UnexpectedError
 
   if (!result.ok) {
+    if (isUnexpectedError(result.error)) {
+      console.error('Bug:', result.error.cause);
+      return Response.json({ error: 'Server error' }, { status: 500 });
+    }
     if (result.error.type === 'VALIDATION') {
       return Response.json(
         { error: 'Validation failed', issues: result.error.issues },
@@ -243,8 +244,7 @@ Complete, runnable example combining Zod validation with a workflow:
 
 ```typescript
 import { z } from 'zod';
-import { Awaitly, ok, err, type Result, type AsyncResult } from 'awaitly';
-import { run } from 'awaitly/run';
+import { ok, err, run, type Result, type AsyncResult } from 'awaitly';
 
 // Schemas
 const EmailSchema = z.string().email();
@@ -278,34 +278,37 @@ const zodToResult = <T>(
     : err({ type: 'VALIDATION', issues: parsed.error.issues });
 };
 
-// Mock database functions
-const checkEmailExists = async (email: string): AsyncResult<boolean, DbError> => {
+// Mock database functions, a dep returns the domain error, so the workflow
+// callback never calls err() itself
+const ensureEmailAvailable = async (
+  email: string
+): AsyncResult<string, EmailTakenError | DbError> => {
   // In real code, this would query the database
-  return ok(false);
+  const taken = false;
+  return taken ? err({ type: 'EMAIL_TAKEN', email }) : ok(email);
 };
 
 const createUser = async (data: { email: string; password: string; name: string }): AsyncResult<{ id: string; email: string; name: string }, DbError> => {
   return ok({ id: '123', email: data.email, name: data.name });
 };
 
-// Registration workflow
-const register = async (rawInput: unknown): AsyncResult<{ id: string; email: string; name: string }, RegisterError> => {
-  return run(async ({ step }) => {
-    // Step 1: Validate input
-    const input = await step('validateInput', () => zodToResult(RegisterSchema, rawInput));
-
-    // Step 2: Check if email is taken
-    const emailExists = await step('checkEmailExists', () => checkEmailExists(input.email));
-    if (emailExists) {
-      return err({ type: 'EMAIL_TAKEN', email: input.email }) as never;
+// Registration workflow, deps first, no type parameters, no cast
+const register = (rawInput: unknown) =>
+  run(
+    {
+      validateInput: async () => zodToResult(RegisterSchema, rawInput),
+      ensureEmailAvailable,
+      createUser,
+    },
+    async (s) => {
+      const input = await s.validateInput();
+      await s.ensureEmailAvailable(input.email);
+      return await s.createUser(input);
     }
-
-    // Step 3: Create user
-    const user = await step('createUser', () => createUser(input));
-
-    return user;
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR }) as AsyncResult<{ id: string; email: string; name: string }, RegisterError>;
-};
+  );
+// register(...) resolves to
+//   AsyncResult<{ id, email, name }, RegisterError | UnexpectedError>
+// with RegisterError spelled out on hover, not hidden behind an alias
 
 // Usage
 const result = await register({
@@ -383,8 +386,7 @@ const handler = async (req: Request) => {
 };
 
 // After
-import { Awaitly } from 'awaitly';
-import { run } from 'awaitly/run';
+import { run } from 'awaitly';
 
 const handler = async (req: Request) => {
   const validation = zodToResult(MySchema, await req.json());
@@ -393,9 +395,7 @@ const handler = async (req: Request) => {
     return Response.json({ error: validation.error.issues }, { status: 400 });
   }
 
-  const result = await run(async ({ step }) => {
-    return await step('doSomething', () => doSomething(validation.value));
-  }, { catchUnexpected: () => Awaitly.UNEXPECTED_ERROR });
+  const result = await run({ doSomething }, async (s) => s.doSomething(validation.value));
 
   if (!result.ok) {
     return Response.json({ error: 'Server error' }, { status: 500 });
@@ -407,7 +407,7 @@ const handler = async (req: Request) => {
 
 ### Step 3: Expand to more endpoints
 
-Once you're comfortable with the pattern, apply it consistently across your API.
+Once you're comfortable with the pattern, apply it across your API.
 
 ## Common Utilities
 
@@ -470,6 +470,6 @@ export const getFirstError = (error: ValidationError): string => {
 ## Tips
 
 1. **Use descriptive error messages in schemas**: They appear in the `issues` array
-2. **Leverage Zod's `path`**: It tells you exactly which field failed
+2. **Use Zod's `path`**: It tells you which field failed
 3. **Combine with `step.try()`**: For schemas with async refinements that might throw
 4. **Create domain-specific schemas**: `EmailSchema`, `UUIDSchema`, etc. for reuse

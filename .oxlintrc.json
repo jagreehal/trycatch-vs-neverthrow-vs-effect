@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "jsPlugins": ["eslint-plugin-awaitly"],
+  "options": { "typeAware": true },
+  "ignorePatterns": ["dist", "node_modules", "src/___temp___"],
+  "categories": { "correctness": "error" },
+  "env": { "vitest": true },
+  "rules": {
+    "awaitly/step-no-immediate-execution": "error",
+    "awaitly/step-require-thunk-for-key": "error",
+    "awaitly/step-stable-cache-keys": "warn",
+    "awaitly/workflow-no-floating": "error",
+    "awaitly/result-no-floating": "error",
+    "awaitly/result-require-handling": "warn",
+    "awaitly/workflow-options-position": "error",
+    "awaitly/result-no-double-wrap": "error",
+    "awaitly/step-no-deps-bypass": "error",
+    "awaitly/error-require-discriminant": "error",
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "src/vanilla.test.ts", "src/neverthrow.test.ts"],
+      "rules": {
+        "awaitly/step-stable-cache-keys": "off",
+        "awaitly/workflow-no-floating": "off",
+        "awaitly/result-no-floating": "off",
+        "awaitly/result-require-handling": "off",
+        "typescript/no-explicit-any": "off",
+        "typescript/unbound-method": "off",
+        "no-unused-vars": "off"
+      }
+    },
+    {
+      "files": ["src/vanilla.test.ts", "src/neverthrow.test.ts"],
+      "rules": { "awaitly/error-require-discriminant": "off" }
+    }
+  ]
+}
