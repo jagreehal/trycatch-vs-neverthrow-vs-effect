@@ -1,15 +1,12 @@
-# Real-World Scenario: Functional Composition
+# Functional composition
 
-**Scenario:** Building reusable data transformation pipelines with type-safe error handling.
-**Key Constraints:** Composability, reusability, readable data flow.
+Reusable pipelines with typed errors. The constraint is how you glue small functions, not which logo is on the import.
 
-See the code: `functional.test.ts`
+See `functional.test.ts`.
 
 ## The Approaches
 
-### 1. Neverthrow (Method Chaining)
-
-Neverthrow uses method chaining for composition:
+### 1. neverthrow (method chaining)
 
 ```typescript
 import { ok, err, Result, ResultAsync } from 'neverthrow';
@@ -39,19 +36,11 @@ const signUp = (email: string, password: string) =>
     .asyncAndThen(({ email, password }) => createUser(email, password));
 ```
 
-**Pros:**
-- Fluent API
-- Good TypeScript inference
-- Familiar to OOP developers
+**Fits this constraint:** fluent `.andThen` / `.map`. Inference is good on short chains.
 
-**Cons:**
-- Nested callbacks for multi-step chains
-- Extracting a reusable pipeline takes a wrapper function
-- Variable scoping gets awkward
+**Costs:** multi-step chains nest. A reusable pipeline is a wrapper function.
 
-### 2. Effect (pipe/flow)
-
-Effect provides functional composition utilities:
+### 2. Effect (`pipe` / `flow`)
 
 ```typescript
 import { Effect, pipe, flow } from 'effect';
@@ -95,18 +84,13 @@ const validateUser = flow(
 );
 ```
 
-**Pros:**
-- Powerful composition
-- Reusable pipelines with `flow`
-- Part of comprehensive ecosystem
+**Fits this constraint:** `flow` builds a reusable pipeline. `pipe` is the same shape as the rest of Effect.
 
-**Cons:**
-- Requires learning Effect paradigm
-- Heavy bundle if composition is all you need
+**Costs:** you learn the Effect model. Bundle is large if composition is all you import.
 
-### 3. Awaitly 4 Result Combinators
+### 3. Awaitly Result combinators
 
-Awaitly 4 exports data-first Result combinators from `awaitly` / `awaitly/result`. They operate on **sync** `Result` values, so the callback to `andThen` returns a `Result` rather than an `AsyncResult`. For async sequential work, use manual checks + `ErrorsOf`, or `run(deps, fn)`.
+Data-first functions on **sync** `Result`. The callback to `andThen` returns a `Result`, not an `AsyncResult`. Async sequential work uses manual checks + `ErrorsOf`, or `run(deps, fn)`.
 
 ```typescript
 import { andThen, map, mapError, ok, run, type ErrorsOf } from 'awaitly';
@@ -128,62 +112,26 @@ const asyncResult = await run(deps, async (s) => {
 });
 ```
 
-There is no `awaitly/functional` package and no `pipe`/`flow`/`R` namespace in Awaitly 4. Collection helpers such as `all`, `allAsync`, `allSettled`, and `any` are exported from `awaitly`. The companion `functional.test.ts` uses a local educational mock of `pipe`/`R` for sync Result demos only.
+There is no `awaitly/functional` package and no `pipe`/`flow`/`R` namespace in Awaitly. Collection helpers such as `all`, `allAsync`, `allSettled`, and `any` are exported from `awaitly`. The companion `functional.test.ts` uses a local educational mock of `pipe`/`R` for sync Result demos only.
 
-Two Awaitly 4 changes affect the collection helpers:
+Two details of the collection helpers:
 
-- `any` / `anyAsync` take a **non-empty** tuple. An empty array is now a compile error and `EmptyInputError` is gone from the return type, so that case disappears before it ships. A value typed as a plain `Result[]` needs a non-empty tuple type or a length check, since TypeScript cannot tell whether it has elements.
-- `allAsync` / `anyAsync` no longer report `PromiseRejectedError`. A rejected promise is a thrown exception, which `UnexpectedError` and `catchUnexpected` already cover, so it no longer widens every caller's union. `anyAsync` also stops letting a thrown racer mask a modelled failure: a modelled error always wins, and the exception propagates only if every racer threw. `allSettledAsync` is unchanged, since per-item `PromiseRejectedError` is the point of it.
+- `any` / `anyAsync` take a **non-empty** tuple. An empty array is a compile error, so that case disappears before it ships. A value typed as a plain `Result[]` needs a non-empty tuple type or a length check, since TypeScript cannot tell whether it has elements.
+- `allAsync` / `anyAsync` do not report `PromiseRejectedError`. A rejected promise is a thrown exception, which `UnexpectedError` and `catchUnexpected` cover, so it does not widen every caller's union. In `anyAsync` a modelled error always wins over a thrown racer, and the exception propagates only if every racer threw. `allSettledAsync` reports per-item `PromiseRejectedError`, since that is the point of it.
 
 ## Comparison Table
 
-| Feature | Neverthrow | Effect | Awaitly 4 |
+| Feature | neverthrow | Effect | Awaitly |
 |---------|------------|--------|-----------|
-| **API Style** | Method chaining | pipe/flow/gen | Data-first combinators + `run(deps)` |
-| **Reusable Pipelines** | Limited | `flow` | Sync `andThen`/`map`; async via `run` |
-| **Curried Helpers** | No | Yes | No (data-first) |
-| **Collection Utils** | `combine` | `Effect.all` | `all` / `allAsync` / `allSettled` |
-| **First-Success** | No | `Effect.firstSuccessOf` | `any` |
-| **All-Errors** | `combineWithAllErrors` | `Effect.all({ mode: 'either' })` | `allSettled` |
-| **Learning Curve** | Low | High | Low |
-| **Bundle Size** | Small | Large | Small |
-| **Ecosystem** | Minimal | Massive | Focused |
+| **API** | Method chaining | pipe / flow / gen | Data-first combinators + `run(deps)` |
+| **Reusable pipeline** | Wrapper function | `flow` | Sync `andThen`/`map`; async via `run` |
+| **Curried helpers** | No | Yes | No (data-first) |
+| **Collections** | `combine` | `Effect.all` | `all` / `allAsync` / `allSettled` |
+| **First success** | No | `Effect.firstSuccessOf` | `any` |
+| **All errors** | `combineWithAllErrors` | `Effect.all({ mode: 'either' })` | `allSettled` |
 
-## When to Use Each
+## Against this constraint
 
-### Choose Neverthrow Method Chaining When:
-- Simple 1-3 step chains
-- Team prefers OOP style
-- Don't need reusable pipelines
-
-### Choose Effect pipe/flow When:
-- Already using Effect ecosystem
-- Need structured concurrency
-- Building complex domain models
-
-### Choose Awaitly 4 When:
-- Want Result types with async/await composition (`run(deps, fn)`)
-- Transitioning from Neverthrow
-- Need collection utilities (`any`, `allSettled`) without Effect
-- Using Awaitly workflows for caching/resume
-
-## Conclusion
-
-For **Functional Composition**:
-- **Awaitly 4** bridges Neverthrow's Result model and Effect-style composition via deps-first `run`, without requiring generators or a `pipe`/`R` DSL.
-- **Effect** remains the gold standard if you need the full ecosystem (Layers, Fibers, Streams).
-- **Neverthrow** method chaining works for simple cases but doesn't scale to complex pipelines.
-
-### Honest Assessment
-
-**Awaitly 4 Strengths:**
-- Familiar `ok`/`err` Result types
-- `run(deps, fn)` keeps multi-step flows linear
-- Smaller learning curve than full Effect
-- Useful collection utilities (`any`, `allSettled`)
-
-**Awaitly 4 Limitations:**
-- No Fiber semantics or structured concurrency
-- No Effect's Layer/Context for DI
-- Sync combinators only, so async chaining is manual or goes through `run`
-- Not a full Effect replacement
+- **Reusable `flow` pipelines and curried helpers:** Effect.
+- **Method chaining on `Result`:** neverthrow. Fine for 1–3 steps; longer chains nest or use `safeTry`.
+- **Data-first `andThen`/`map` on sync Results, async via `run`:** Awaitly. No Fiber, no Layer, no `pipe`/`R` DSL.

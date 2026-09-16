@@ -1,15 +1,14 @@
-# Real-World Scenario: Streaming Data Processing
+# Streaming: backpressure and error edges
 
-**Scenario:** Processing large datasets (log files, CSV imports, event streams) with Result-aware transformations.
-**Key Constraints:** Memory efficiency, backpressure handling, error propagation through streams.
+Log files, CSV imports, event streams. The constraint is memory, backpressure, and how a failed item shows up.
 
-See the code: `streaming.test.ts`
+See `streaming.test.ts`.
 
 ## The Approaches
 
-### 1. Manual Implementation (Vanilla/Neverthrow)
+### 1. Manual (vanilla / neverthrow)
 
-Without built-in streaming support, you need to implement your own:
+You write the generator and the high-water mark:
 
 ```typescript
 import { ok, err, Result } from 'neverthrow';
@@ -62,18 +61,13 @@ async function processWithBackpressure(
 }
 ```
 
-**Pros:**
-- Full control over implementation
-- No additional dependencies
+**Fits this constraint:** you control every buffer. No extra dependency.
 
-**Cons:**
-- Significant boilerplate
-- Easy to get backpressure wrong
-- No standard transformer composition
+**Costs:** you own backpressure. Composition of transformers is yours.
 
 ### 2. Effect Stream
 
-Effect provides powerful stream processing:
+`Stream` is part of the Effect runtime:
 
 ```typescript
 import { Stream, Effect, Chunk } from 'effect';
@@ -106,22 +100,15 @@ await Effect.runPromise(
 );
 ```
 
-**Pros:**
-- Powerful composition operators
-- Built-in backpressure and concurrency control
-- Error handling integrated with Effect ecosystem
-- Windowing, merging, and complex stream operations
+**Fits this constraint:** windowing, merge/split, interruption, backpressure in the same model as the rest of Effect.
 
-**Cons:**
-- Requires learning Effect paradigm
-- Heavy bundle size
-- May be overkill for simple use cases
+**Costs:** you are in the Effect runtime. Bundle is large if Stream is the only reason to adopt it.
 
-### 3. Awaitly Streaming (Awaitly 4)
+### 3. Awaitly (`awaitly/durable`)
 
-*This scenario uses `awaitly/durable` with durable workflows for backpressure and resume. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+This sample uses durable workflows because the test wants resume plus backpressure. For Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).
 
-`awaitly/durable` provides Result-aware stream transformers with familiar APIs:
+Transformers are data-first functions over async iterables:
 
 ```typescript
 import { createWorkflow } from 'awaitly';
@@ -165,17 +152,9 @@ const result = await job.run(async ({ step, deps }) => {
 });
 ```
 
-**Pros:**
-- Plain async iterables, so `for await` works with no TransformStream plumbing
-- Result-aware transformers
-- Automatic backpressure
-- Integrates with workflow caching/resume
-- Simpler than Effect for common cases
+**Fits this constraint:** `for await` over async iterables. A failed read is `STREAM_READ_ERROR` on the workflow result. Step keys resume a crashed consumer.
 
-**Cons:**
-- Less powerful than Effect Stream (no windowing)
-- Newer API, less battle-tested
-- Limited stream merging/splitting
+**Costs:** no windowing, no merge/split. One backpressure strategy (high-water mark). Newer than Effect Stream.
 
 **What the analyzer sees.** `awaitly-analyze src/comparison/streaming.test.ts` draws `streamProcess` as two `for...of` loops, one per stage, with the error each step can raise:
 
@@ -225,7 +204,7 @@ Every transformer is data-first: it takes the source (a `StreamReader` or any `A
 
 `collect` and `reduce` return plain promises, not Results: they are terminal consumers of an async iterable, and returning a Result would make every caller unwrap one to get an array.
 
-You do not lose typed errors by that choice. Since Awaitly 4.1 the workflow boundary sorts the two failure modes. A stream failure (`STREAM_READ_ERROR` and friends) arrives as a typed value the way `STEP_TIMEOUT` does, while a throw from your own transform callback stays an `UnexpectedError` with the original on `.cause`. Declare it (`errors: ['STREAM_READ_ERROR']`) to put it in the static union; wrap with `step.try` only when you want your own callback throws typed too.
+You do not lose typed errors by that choice. The workflow boundary sorts the two failure modes. A stream failure (`STREAM_READ_ERROR` and friends) arrives as a typed value the way `STEP_TIMEOUT` does, while a throw from your own transform callback stays an `UnexpectedError` with the original on `.cause`. Declare it (`errors: ['STREAM_READ_ERROR']`) to put it in the static union; wrap with `step.try` only when you want your own callback throws typed too.
 
 ## Backpressure Handling
 
@@ -247,35 +226,17 @@ for (const item of hugeDataset) {
 
 ## Comparison Table
 
-| Feature | Manual | Effect Stream | Awaitly Streaming |
+| Feature | Manual | Effect Stream | Awaitly `durable` |
 |---------|--------|---------------|-------------------|
-| **API Style** | Custom | Functional operators | Data-first fns over async iterables |
-| **Learning Curve** | High (custom impl) | High (Effect) | Low (familiar APIs) |
-| **Backpressure** | Manual | Automatic | Automatic |
-| **Error Handling** | Manual | Effect errors | Result types |
-| **Windowing** | Manual | Built-in | Not supported |
-| **Merging/Splitting** | Manual | Built-in | Limited |
-| **Workflow Integration** | Manual | Custom | Built-in |
-| **Resume Support** | Manual | Custom | Built-in |
-| **Bundle Size** | None | Large | Small |
+| **API** | Custom generator | Stream operators | Data-first fns over async iterables |
+| **Backpressure** | You write it | Runtime | High-water mark |
+| **Errors** | Your Result or throw | Effect error channel | Result + `STREAM_READ_ERROR` |
+| **Windowing** | You write it | Built-in | Not supported |
+| **Merge / split** | You write it | Built-in | Limited |
+| **Resume with the workflow** | You persist it | You persist it | Step keys + stream store |
 
-## Conclusion
+## Against this constraint
 
-For **Streaming Data Processing**:
-- **Awaitly Streaming** is ideal for common use cases: log processing, CSV imports, event streams. Plain async iterables, Result-aware, integrates with workflow resume.
-- **Effect Stream** covers harder scenarios: windowing, stream merging, tunable backpressure. Worth it if you already run Effect.
-- **Manual Implementation** makes sense when you have a requirement neither library covers.
-
-### Honest Assessment
-
-**Awaitly Streaming Strengths:**
-- Much simpler than Effect for common streaming patterns
-- Result-aware transformers eliminate manual error checking
-- Web Streams API is already familiar to many developers
-- Workflow integration means a stream can resume
-
-**Awaitly Streaming Limitations:**
-- No windowing (time-based or count-based with overlap)
-- One backpressure strategy (high-water mark)
-- No stream merging/splitting operators
-- Less mature than Effect Stream
+- **Windowing, merge, split, tunable backpressure:** Effect Stream.
+- **Resume a crashed consumer without leaving async iterables:** Awaitly `durable` stream store + step keys.
+- **No extra library, one file:** the manual generator. You own backpressure.

@@ -1,22 +1,18 @@
-# Real-World Scenario: Data Pipeline with Caching & Resume
+# Data pipeline: cache keys and resume
 
-**Scenario:** A data pipeline that fetches a User, then their Posts, then Comments for those posts, and then processes Analytics.
-**Key Constraints:** APIs are slow (need caching) and processes may be interrupted (need resume capability).
+Fetch a user, their posts, comments on those posts, then analytics. Slow APIs make cache keys useful. A crash mid-run makes resume useful.
 
-See the code: `data-pipeline.test.ts`
+See `data-pipeline.test.ts`.
 
 ## The Approaches
 
-### 1. The Awaitly Approach
+### 1. Awaitly
 
-*This scenario uses `createWorkflow` because the pipeline needs step caching and resume. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+This sample uses `createWorkflow` because the test needs step keys and resume. For Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).
 
-*High readability, built-in caching and resume.*
-
-Awaitly excels here because caching and resume state are first-class features. You configure the step with a `key` rather than wrapping your logic in external helpers.
+You pass a `key` on the step. Replay skips work that already succeeded.
 
 ```typescript
-// Built-in caching and resume
 return workflow.run(async ({ step, deps }) => {
   const user = await step(
     'fetchUser',
@@ -29,14 +25,9 @@ return workflow.run(async ({ step, deps }) => {
 });
 ```
 
-**Pros:**
-- **Caching:** The `key` parameter gives you idempotency and caching, so you skip duplicate API calls.
-- **Resume:** Can pause and resume the pipeline from the last successful step (using `resumeState`).
-- **Observability:** runs and steps emit OpenTelemetry spans on their own since 4.5, and the `onEvent` hook is still there for step-by-step events.
-- **Automatic Error Inference:** TypeScript infers the union of every error your deps produce, plus the `UnexpectedError` safety net unless you opt into strict mode.
+**Fits this constraint:** cache and resume are step options. Runs emit OpenTelemetry spans; `onEvent` is there if you want step logs.
 
-**Cons:**
-- Requires the `createWorkflow` wrapper (from `awaitly`) to get the full power of caching/inference.
+**Costs:** you take `createWorkflow` (or `durable.run`) to get keys and resume. Bound keys are position-derived; a drifted resume fails with `WorkflowShapeDriftError`.
 
 **What the analyzer sees.** `awaitly-analyze src/comparison/data-pipeline.test.ts` draws the pipeline from the source, one node per step and one `err` edge per error the dep can produce:
 
@@ -52,10 +43,9 @@ flowchart LR
   PA -->|err| PAE["ANALYTICS_FAILED"]
 ```
 
-### 2. The Neverthrow Approach
-*Explicit, but requires manual helpers.*
+### 2. neverthrow
 
-Neverthrow handles the happy path with chains, and has no built-in retry or caching for promises. You often end up writing custom helpers or using raw `try/catch` loops inside your Result chains.
+The happy path is a chain. Retry, cache, and resume are helpers you write, or `try/catch` loops inside the chain.
 
 ```typescript
 return fetchUserNt(userId).andThen((user) =>
@@ -65,29 +55,17 @@ return fetchUserNt(userId).andThen((user) =>
 );
 ```
 
-**Pros:**
-- **Explicit Data Flow:** You can see what data goes where.
-- **No Magic:** Functions calling functions.
+**Fits this constraint:** you see each hop. No extra runtime.
 
-**Cons:**
-- **No Native Caching:** You check a cache by hand before calling the function.
-- **No Resume State:** You write the checkpoint/resume logic yourself.
-- **Nesting:** As the pipeline grows (User -> Posts -> Comments -> Analytics), the indentation drift ("callback hell") can get real.
+**Costs:** cache and resume are yours. User → posts → comments → analytics nests unless you use `safeTry`.
 
-### 3. The Effect Approach
-*Powerful policies, steep learning curve.*
+### 3. Effect
 
-Effect exists for this. It treats retries, timeouts, and concurrency limits as reusable policies that you compose around your effects. In the tests we wrap the comment/post fetchers with `Effect.timeout` + `Effect.mapError` + `Effect.retry` driven by an exponential `Schedule`, then join them via `Effect.all`.
+Retries, timeouts, and concurrency limits are `Schedule` and combinators. The tests wrap comment/post fetchers with `Effect.timeout`, `Effect.mapError`, and `Effect.retry`, then join them with `Effect.all`.
 
-**Pros:**
-- **Policy Composition:** Retries, timeouts, and rate limits are one combinator each (`Effect.retry`, `Effect.timeout`).
-- **Concurrency:** `Effect.all(..., { concurrency: 'unbounded' })` makes parallel fetching (like comments for all posts) straightforward and cancels losers on failure.
-- **Request Caching:** Effect ships a request cache service if you need deduping.
+**Fits this constraint:** retry and timeout are data. `Effect.all` cancels losers. Request cache dedupes in-process.
 
-**Cons:**
-- **Complexity:** Requires understanding `Effect`, `Schedule`, `yield*`, and `pipe`.
-- **Resume State:** Resume functionality would require custom implementation.
-- **Overkill:** Might be too much "machinery" for a simple script.
+**Costs:** you learn `Effect`, `Schedule`, `yield*`, and `pipe`. Crash-resume across process death is still yours to persist. A one-off script pays for the runtime without using it.
 
 **What the analyzer sees.** `effect-analyze src/comparison/data-pipeline.test.ts` draws `dataPipelineEffect` with the error channel of each yield in the node label. The comments fetch shows up as a loop because the code uses `Effect.forEach`; an earlier draft used `Effect.all(posts.map(...))`, which the analyzer rendered as `Effect.all (0)` and `@effect/tsgo` flagged during `tsc` with the suggestion to switch. Style lines trimmed:
 
@@ -118,9 +96,9 @@ flowchart TB
   n2 --> end_node
 ```
 
-### 4. Awaitly Advanced Features
+### 4. Awaitly policies and durable run
 
-Awaitly now provides the same production-grade reliability features as Effect, with familiar syntax:
+Same pipeline, with circuit breaker, rate limiter, and `durable.run`:
 
 ```typescript
 import { durable } from 'awaitly/durable';
@@ -157,108 +135,26 @@ const result = await durable.run(
 );
 ```
 
-**Pros:**
-- **Built-in Policies:** `servicePolicies.httpApi`, `retryPolicies`, `timeoutPolicies`
-- **Circuit Breakers:** `createCircuitBreaker` with presets (critical/standard/lenient)
-- **Rate Limiting:** `createRateLimiter`, `createConcurrencyLimiter`
-- **Durable Execution:** `durable.run` with automatic checkpointing and resume
-- **Familiar Syntax:** Still async/await, no new paradigm to learn
+`servicePolicies`, `createCircuitBreaker`, `createRateLimiter`, and `durable.run` live in this layer. Syntax stays async/await.
 
-**Resume correctness (Awaitly 4):** a pipeline is where a bad resume hurts most, because replaying the wrong checkpoint feeds one step's data into another without complaint. Bound step keys are position-derived (`fetchPosts`, `fetchPosts#2`, …), so inserting a step used to shift every later key and your only defence was remembering to bump `version`. Snapshots now record the executed step order, and a drifted resume fails with `WorkflowShapeDriftError` instead of replaying. The check runs in `onBeforeStep`, before the stored value is read, which is the last place it can be caught: `onAfterStep` never fires for a replayed step.
+Resume is the sharp edge. Replaying the wrong checkpoint feeds one step's data into another. Snapshots record executed step order; a drifted resume fails with `WorkflowShapeDriftError` in `onBeforeStep`, before the stored value is read.
 
 ## Comparison Table
 
-| Feature | Awaitly | Neverthrow | Effect |
+| Feature | neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
-| **Caching** | Built-in (`key` param) | Manual implementation | Via Request Cache service |
-| **Resume State** | Built-in (`resumeState`, `durable.run`) | Manual implementation | Manual implementation |
-| **Observability** | Built-in (OpenTelemetry spans, plus `onEvent`) | Manual implementation | Runtime tracing / logging |
-| **Circuit Breaker** | Built-in (`createCircuitBreaker`) | Manual implementation | Manual implementation |
-| **Rate Limiting** | Built-in (`createRateLimiter`) | Manual implementation | Manual implementation |
-| **Policies** | Built-in (`servicePolicies`) | Manual implementation | Via `Schedule` |
-| **Parallelism** | `allAsync()`, `step.all()` | `ResultAsync.combine()` | `Effect.all()` |
-| **Syntax** | Async/Await | Method Chaining | Generator (`yield*`) |
-| **Readability** | High | Medium (Nesting) | High (Once learned) |
+| **In-process cache** | You write it | Request cache service | Step `key` |
+| **Resume after crash** | You persist it | You persist it | `resumeState` / `durable.run` |
+| **Tracing** | You add it | Runtime tracing / logging | OpenTelemetry spans + `onEvent` |
+| **Circuit breaker** | You write it | Compose from `Schedule` / defect handling | `createCircuitBreaker` |
+| **Rate limit** | You write it | `Schedule` / platform rate limiter | `createRateLimiter` |
+| **Retry / timeout** | You write it | `Schedule` | `servicePolicies` / step options |
+| **Parallel** | `ResultAsync.combine()` | `Effect.all()` | `allAsync()` / `step.all()` |
 
-### 5. Streaming Pipeline (Awaitly 4)
+Streaming that pipeline (windowing vs resume-on-batch) is in [streaming.md](./streaming.md).
 
-For pipelines processing large datasets, `awaitly/durable` provides Result-aware stream transformers:
+## Against this constraint
 
-```typescript
-import {
-  durable,
-  createMemoryStreamStore,
-  pipe,
-  map,
-  filter,
-  chunk,
-} from 'awaitly/durable';
-
-// durable.run takes a streamStore, so durable execution and streaming compose
-// in one call, resume a long pipeline *and* stream it
-const streamStore = createMemoryStreamStore();
-
-const result = await durable.run(
-  { saveBatch },
-  async ({ step, deps }) => {
-    const reader = step.getReadable<string>({ namespace: 'input' });
-
-    // Data-first transformers composed with pipe(); each stage takes the source
-    const batches = pipe(
-      reader,
-      (s) => map(s, (line) => line.trim()),
-      (s) => filter(s, (line) => line.length > 0),
-      (s) => chunk(s, 100) // Batch for efficient writes
-    );
-
-    // for-await is the native shape: each batch is a keyed step, so a crash
-    // resumes at the batch it died on
-    let total = 0;
-    for await (const batch of batches) {
-      await step('saveBatch', () => deps.saveBatch(batch), { key: `batch:${total}` });
-      total += batch.length;
-    }
-
-    return { total };
-  },
-  {
-    id: `pipeline-${jobId}`,
-    store: durableStore,
-    streamStore,
-    version: 1,
-    // Declaring it puts STREAM_READ_ERROR in the static union, so the switch
-    // below is exhaustive rather than a runtime string comparison
-    errors: ['STREAM_READ_ERROR'],
-  }
-);
-
-// A failing stream is infrastructure failing, not a bug: it arrives as a typed
-// value, never wrapped in UnexpectedError
-if (!result.ok) {
-  switch (result.error.type ?? result.error) {
-    case 'STREAM_READ_ERROR':
-      return { status: 503 }; // the store is down, retry later
-    case 'SAVE_FAILED':
-      return { status: 500 };
-  }
-}
-```
-
-**Key Features:**
-- **Plain async iterables**: every transformer takes the source first and returns an `AsyncIterable`, so `for await` and `pipe()` both work
-- **Backpressure**: Pauses upstream when downstream falls behind
-- **Workflow integration**: the reader comes from the run's `streamStore`, so steps around it still cache and resume
-- **Typed infrastructure failures**: a stream read failure arrives as `STREAM_READ_ERROR` in `result.error`, matched like `STEP_TIMEOUT`, while a throw from your own transform callback stays an `UnexpectedError`. Declaring it with `errors` also puts it in the static union, so TypeScript checks the boundary switch. Effect models this in the stream's error channel; here it stays in the one `result.error` union you already match on.
-- **Composable**: Chain transformers like Unix pipes
-
-**Limitations vs Effect Stream:**
-- No windowing (time or count-based)
-- Simpler backpressure model
-- No stream merging/splitting
-
-## Conclusion
-
-For **Data Pipelines**:
-- **Awaitly** now matches Effect's feature set for reliability (circuit breakers, rate limiting, policies, durable execution, streaming) while maintaining familiar async/await syntax. It's the best choice for teams that want production-grade reliability without learning a new paradigm.
-- **Effect** remains powerful if you need structured concurrency with fiber semantics, complex stream operations, and are comfortable with functional programming.
-- **Neverthrow** struggles here without extra utility libraries for caching, resume, streaming, and reliability features.
+- **Fewest lines for cache keys plus crash-resume:** Awaitly step `key` and `durable.run`. neverthrow and Effect leave persistence to you.
+- **Retry, timeout, and cancel-on-failure as one model:** Effect `Schedule` + `Effect.all`.
+- **Result chain with no extra runtime:** neverthrow, if you accept writing cache and resume.

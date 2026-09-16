@@ -1,6 +1,6 @@
 # Using Prisma with Awaitly
 
-Turn Prisma database errors into typed Results for exhaustive error handling.
+Awaitly-only. Map Prisma error codes to a typed `Result`.
 
 ## Why Combine Them?
 

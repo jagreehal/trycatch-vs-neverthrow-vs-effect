@@ -1,22 +1,18 @@
-# Real-World Scenario: Multi-Tenant Workflow
+# Multi-tenant: branches on plan
 
-**Scenario:** A SaaS workflow whose behaviour depends on the Tenant's Plan (Free vs Pro vs Enterprise).
-**Key Constraints:** Conditional logic (if/else/switch), branching paths.
+Behaviour depends on Free vs Pro vs Enterprise. The constraint is `if` / `switch` on tenant state, plus optional human approval.
 
-See the code: `multi-tenant-workflow.test.ts`
+See `multi-tenant-workflow.test.ts`.
 
 ## The Approaches
 
-### 1. The Awaitly Approach
+### 1. Awaitly
 
-*This scenario uses `createWorkflow` because tenant processing needs conditional steps and HITL. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+This sample uses `createWorkflow` because the test needs named steps and HITL. For Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).
 
-*Plain JavaScript.*
-
-Since Awaitly uses standard `async/await`, you can use standard JavaScript control flow statements like `if`, `else`, and `switch`.
+`if`, `else`, and `switch` are ordinary JavaScript:
 
 ```typescript
-// It's just standard code!
 return workflow.run(async ({ step, deps }) => {
   const tenant = await step('fetchTenant', () => deps.fetchTenant(tenantId), {
     description: 'Fetch tenant',
@@ -61,10 +57,9 @@ if (tenant.plan === 'free') {
 });
 ```
 
-**Pros:**
-- **Zero Friction:** No need to learn "functional" equivalents of `if` statements.
-- **Readability:** A dev new to the codebase can read this on day one.
-- **Human-in-the-Loop:** For multi-tenant workflows needing approval (e.g., enterprise plan changes), Awaitly provides `createHITLOrchestrator` for pausing workflows pending human approval.
+**Fits this constraint:** native `if`/`switch`. `createHITLOrchestrator` pauses for approval.
+
+**Costs:** you take a workflow wrapper. HITL is Awaitly-specific; the other two write that loop themselves.
 
 **What the analyzer sees.** Plain `if` and `switch` are diagrammable. `awaitly-analyze src/comparison/multi-tenant-workflow.test.ts` derives the branch labels from the conditions in the source, so the `'pro'` and `'enterprise'` arms and the free-plan shortcut all appear:
 
@@ -138,10 +133,9 @@ await orchestrator.execute('plan-upgrade', workflowFactory, async ({ step, deps,
 }, input);
 ```
 
-### 2. The Neverthrow Approach
-*Functional Conditionals.*
+### 2. neverthrow
 
-Neverthrow doesn't have "statements". Everything is an expression. This makes branching logic awkward. You often have to return `Result`s from inside `map` or `andThen`, leading to return type mismatches that are hard to fix.
+Chains are expressions. A branch must return the same `Result` type, so you normalize Pro vs Free by hand.
 
 ```typescript
 return fetchTenant(id).andThen(tenant => {
@@ -152,17 +146,13 @@ return fetchTenant(id).andThen(tenant => {
 });
 ```
 
-**Pros:**
-- **Expressions:** Forces you to treat code as expressions (value-oriented).
+**Fits this constraint:** linear pipelines stay explicit.
 
-**Cons:**
-- **Awkward Branching:** `if/else` inside chains often feels clunky.
-- **Type Mismatches:** All branches must return compatible `Result` types, which takes some work to align by hand.
+**Costs:** `if` inside `andThen` must return one `Result` type. Divergent success types take extra mapping.
 
-### 3. The Effect Approach
-*Generators enable imperative control flow.*
+### 3. Effect
 
-Like Workflow, Effect uses generators (`yield*`), which allows using standard `if/switch` statements.
+`Effect.gen` lets you write `if` / `switch` the same way Awaitly does, inside the generator:
 
 ```typescript
 Effect.gen(function* () {
@@ -173,11 +163,9 @@ Effect.gen(function* () {
 });
 ```
 
-**Pros:**
-- **Flexible:** Combines the power of functional programming with imperative control flow syntax.
+**Fits this constraint:** native `if`/`switch` in `gen`. `Effect.all` for the users/resources fork.
 
-**Cons:**
-- **Setup:** Still requires the Effect boilerplate (`Effect.gen`, `runPromise`, etc.).
+**Costs:** you still run a generator through `Effect.runPromise`. HITL is yours to persist.
 
 **What the analyzer sees.** `effect-analyze src/comparison/multi-tenant-workflow.test.ts` reads the same `if` statements out of the generator and draws the users/resources fork. Style lines trimmed:
 
@@ -221,89 +209,17 @@ flowchart TB
 
 ## Comparison Table
 
-| Feature | Awaitly | Neverthrow | Effect |
+| Feature | neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
-| **Control Flow** | Native (`if`/`switch`) | Functional (`match` / conditionals inside `map`) | Native (`if`/`switch` in gen) |
-| **Branch Typing** | Automatic Union | Manual Alignment | Automatic Union |
-| **Readability** | High | Low (for complex branches) | High |
-| **Approval Workflows** | Built-in (HITL) | Manual | Manual |
-| **Durable Execution** | Built-in | Manual | Manual |
+| **Control flow** | `match` / `if` inside `map` | `if`/`switch` in `gen` | `if`/`switch` in async/await |
+| **Branch types** | You align them | Inferred | Inferred from deps |
+| **Human approval** | You persist it | You persist it | `createHITLOrchestrator` |
+| **Delay between tenants** | `setTimeout` | `Effect.sleep` | `step.sleep` |
 
-### Rate-Limited Tenant Processing with step.sleep() (Awaitly 4)
+`step.sleep('notify-delay', '1s')` is Awaitly's delay helper with optional cache keys. Effect uses `Effect.sleep`. neverthrow uses the platform timer. See the test file for the Awaitly loop.
 
-For multi-tenant workflows that need rate limiting between API calls:
+## Against this constraint
 
-```typescript
-import { createWorkflow } from 'awaitly';
-import { seconds, minutes } from 'awaitly';
-
-const processTenants = createWorkflow('processTenants', {
-  fetchTenants,
-  processUsage,
-  sendNotification,
-  syncToDataWarehouse,
-});
-
-const result = await processTenants.run(async ({ step, deps }) => {
-  const tenants = await step('fetchTenants', () => deps.fetchTenants(), {
-    description: 'Fetch all tenants',
-    key: 'fetch-tenants',
-  });
-
-  const results = [];
-
-  for (const tenant of tenants) {
-    // Rate limit based on tenant plan
-    const rateLimit = tenant.plan === 'enterprise' ? '100ms' : '1s';
-
-    // Process tenant
-    const usage = await step('processUsage', () => deps.processUsage(tenant.id), {
-      description: `Process ${tenant.name}`,
-      key: `usage:${tenant.id}`,
-    });
-
-    // Rate-limited notification (string duration syntax)
-    await step.sleep('notify-delay', rateLimit, { key: `notify-delay:${tenant.id}` });
-
-    await step('sendNotification', () => deps.sendNotification(tenant, usage), {
-      description: `Notify ${tenant.name}`,
-      key: `notify:${tenant.id}`,
-    });
-
-    // Longer delay before data warehouse sync (duration helper)
-    await step.sleep('sync-delay', seconds(5), { key: `sync-delay:${tenant.id}` });
-
-    await step('syncToDataWarehouse', () => deps.syncToDataWarehouse(tenant.id, usage), {
-      description: `Sync ${tenant.name}`,
-      key: `sync:${tenant.id}`,
-    });
-
-    results.push({ tenantId: tenant.id, usage });
-  }
-
-  return results;
-});
-```
-
-**Key Features:**
-- **Human-readable durations**: `'5s'`, `'1m 30s'`, `'2h'`
-- **Duration helpers**: `seconds(5)`, `minutes(1)`, `hours(2)`
-- **Caching with key**: Resumed workflows skip completed sleeps
-- **Cancellation**: Supports `AbortSignal` for graceful shutdown
-
-**Use Cases:**
-- Rate limiting API calls per tenant
-- Staggered batch processing
-- Polling intervals with backoff
-- Graceful delays before cleanup
-
-### Result Composition for Tenant Processing (Awaitly 4)
-
-Awaitly 4 exports Result combinators from `awaitly` and `awaitly/result`. For this multi-step tenant workflow, `run(deps, fn)` or `createWorkflow()` remains the clearest form; there is no `awaitly/functional` entry point.
-
-## Conclusion
-
-For **Logic with Branching (Multi-Tenant)**:
-- **Awaitly** offers the best DX: imperative control flow, automatic type unions, built-in support for approval workflows (HITL), durable execution, rate limiting with `step.sleep()`, and root Result combinators.
-- **Effect** offers excellent syntax via generators and powerful concurrency, but lacks built-in HITL.
-- **Neverthrow** can be cumbersome here. Functional pipelines are great for linear sequences but struggle with complex branching logic.
+- **`if`/`switch` without a workflow wrapper:** Effect `gen`, or Awaitly `run` without `createWorkflow`. neverthrow pays in branch alignment.
+- **Pause for a human and resume:** Awaitly HITL. The other two store that state themselves.
+- **Linear Result pipeline, no branches:** neverthrow.

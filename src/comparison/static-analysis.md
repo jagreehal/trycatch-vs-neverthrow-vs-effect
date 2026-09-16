@@ -1,9 +1,6 @@
-# Reading Code You Didn't Write: Static Analysis for Awaitly and Effect
+# Static analysis: Awaitly and Effect
 
-**Scenario:** A reviewer opens a 400-line pull request touching a payment workflow. They need to know what changed in the failure paths, beyond which lines moved.
-**Key Constraints:** No runtime, no instrumentation, no separate diagram to keep in sync.
-
-Two of the four approaches in this repo ship a static analyzer that reads your source and tells you what the program does:
+A reviewer needs the failure paths of a payment workflow without running it. Two of the four approaches ship an analyzer that reads TypeScript and prints that.
 
 | Tool | Package | Reads |
 |------|---------|-------|

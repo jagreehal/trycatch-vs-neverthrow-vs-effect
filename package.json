@@ -27,18 +27,18 @@
   "license": "ISC",
   "devDependencies": {
     "@effect/tsgo": "0.45.0",
-    "awaitly-analyze": "0.31.0",
+    "awaitly-analyze": "0.31.2",
     "effect-analyzer": "3.6.0",
-    "eslint-plugin-awaitly": "^4.0.0",
-    "oxlint": "1.82.0",
+    "eslint-plugin-awaitly": "^4.1.0",
+    "oxlint": "1.83.0",
     "oxlint-tsgolint": "7.0.2001",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.1"
   },
   "dependencies": {
-    "awaitly": "^6.1.0",
+    "awaitly": "^6.2.0",
     "effect": "4.0.0-rc.112",
     "neverthrow": "^8.2.0",
-    "zod": "^4.6.4"
+    "zod": "^4.6.5"
   }
 }

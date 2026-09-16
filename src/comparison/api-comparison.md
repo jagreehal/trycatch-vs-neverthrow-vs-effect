@@ -1,12 +1,10 @@
-# API Feature Comparison
+# API feature comparison
 
-This document provides a direct, pattern-by-pattern comparison of **Neverthrow**, **Effect**, and **Awaitly** based on the test suite in `api-comparison.test.ts`.
-
-It highlights how each library handles common tasks like result construction, chaining, error inference, and parallelism.
+Pattern-by-pattern notes from `api-comparison.test.ts`. neverthrow, Effect, and Awaitly on the same tasks.
 
 ## 1. Basic Result Construction
 
-How do you create a success or failure value?
+Create a success or failure value.
 
 ### Neverthrow
 Explicit `ok` and `err` functions.
@@ -17,15 +15,15 @@ const failure = err('NOT_FOUND');
 ```
 
 ### Effect
-`Effect.succeed` and `Effect.fail`. These create "blueprints" for values, not the values themselves (until run).
+`Effect.succeed` and `Effect.fail`. These describe values. They exist after you run the program.
 ```typescript
 import { Effect } from 'effect';
 const success = Effect.succeed({ id: '1' });
 const failure = Effect.fail('NOT_FOUND');
 ```
 
-### awaitly
-Same shape as Neverthrow: `{ ok: true, value: ... }` or `{ ok: false, error: ... }`. This is the minimum Awaitly surface. You can stop here.
+### Awaitly
+Same shape as neverthrow: `{ ok: true, value: ... }` or `{ ok: false, error: ... }`.
 
 ```typescript
 import { ok, err } from 'awaitly';
@@ -37,10 +35,10 @@ const failure = err('NOT_FOUND');
 
 ## 2. Sequential Operations
 
-How do you chain dependent operations (e.g., fetch user -> fetch posts)?
+Chain fetch-user then fetch-posts.
 
 ### Neverthrow (Method Chaining)
-Uses fluent chaining with `.andThen()`. Great for short chains, but can lead to "callback hell" nesting or complex variable passing for longer chains.
+Fluent `.andThen()`. Short chains stay flat. Longer ones nest or use `safeTry`.
 ```typescript
 fetchUser('1')
   .andThen(user => fetchPosts(user.id)
@@ -98,31 +96,19 @@ const result = await run({ fetchUser, fetchPosts }, async (s) => {
 });
 ```
 
-### Awaitly (`createWorkflow`, the optional production tier)
-Add `createWorkflow()` when you need caching, resume, or named production workflows.
+### Awaitly (`createWorkflow`)
+Named steps, cache keys, resume. Optional. Details in [ADVANCED.md](../../ADVANCED.md).
 
-```typescript
-import { createWorkflow } from 'awaitly';
-
-const loadUserData = createWorkflow('loadUserData', { fetchUser, fetchPosts });
-
-const result = await loadUserData.run(async ({ step, deps }) => {
-  const user = await step('getUser', () => deps.fetchUser('1'));
-  const posts = await step('getPosts', () => deps.fetchPosts(user.id));
-  return { user, posts };
-});
-```
-
-**DX Verdict:**
-- **Neverthrow:** Clean for 1-2 steps. Harder for 3+.
-- **Effect:** Flat syntax with generators. Requires learning Effect.
-- **Awaitly:** Start with manual checks + `ErrorsOf`. Add `run(deps, fn)` when if-boilerplate hurts; `createWorkflow()` when you need caching/resume.
+**Against this constraint:**
+- **neverthrow:** clean for 1–2 steps. Deeper chains nest or use `safeTry`.
+- **Effect:** flat `gen`. You learn the runtime.
+- **Awaitly:** manual checks + `ErrorsOf`, or `run(deps, fn)` to unwrap. `createWorkflow` only if you need keys or resume.
 
 ---
 
 ## 3. Error Type Inference
 
-How easy is it to know what errors your code might throw?
+What is in the error channel, and who writes that union?
 
 ### Neverthrow
 Manual union types are often required. You declare the error types in function signatures or reach for helpers, and you guard synchronous validations before entering async chains.
@@ -165,9 +151,7 @@ const myWorkflow = createWorkflow('myWorkflow', deps);
 // TypeScript knows: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
 ```
 
-**What Awaitly 4 changed:** the inferred union is now *displayed* as its concrete literals. Through v3, hovering `result.error` on an inferred workflow showed an opaque alias, `ErrorsOf<{ …the whole deps object… }>`, because a named alias over a generic never expands in TypeScript's display. The type was right and you could not read it, so a typo like `result.error === 'NOT_FUOND'` looked plausible in the editor. Now the same hover reads `'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError`, and the typo is an obvious compile error. This puts awaitly level with Effect's explicit error channel without asking you to write the union down.
-
-**DX Verdict:** Awaitly's inference removes the hand-written union, and in v4 you can see what it inferred.
+The inferred union is *displayed* as its concrete literals. Hovering `result.error` on an inferred workflow reads `'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError`, not an opaque `ErrorsOf<{ …the whole deps object… }>` alias, so a typo like `result.error === 'NOT_FUOND'` is a visible compile error. That matches Effect's explicit error channel without asking you to write the union down.
 
 ---
 
@@ -420,7 +404,7 @@ const processed = pipe(
 const results = await collect(processed);
 ```
 
-A stream failure is not lost by that choice. Since Awaitly 4.1 a failing read arrives as a typed value at the workflow boundary, the same way `STEP_TIMEOUT` does, instead of being wrapped in `UnexpectedError`:
+A stream failure is not lost by that choice. A failing read arrives as a typed value at the workflow boundary, the same way `STEP_TIMEOUT` does, instead of being wrapped in `UnexpectedError`:
 
 ```typescript
 if (!result.ok && (result.error.type ?? result.error) === 'STREAM_READ_ERROR') {
@@ -459,7 +443,7 @@ pipe(
 ```
 
 ### Awaitly
-Awaitly 4 exports data-first Result combinators from the root (sync `Result` only):
+Awaitly exports data-first Result combinators from the root (sync `Result` only):
 ```typescript
 import { andThen, map, mapError } from 'awaitly';
 
@@ -500,7 +484,7 @@ const fetchUser = (id: string) =>
 ```
 
 ### Awaitly
-Awaitly 4 wraps the platform boundary with `tryAsync` and application-defined errors:
+Awaitly wraps the platform boundary with `tryAsync` and application-defined errors:
 ```typescript
 import { tryAsync } from 'awaitly';
 
@@ -518,24 +502,22 @@ const result = await tryAsync(
 
 ## Summary
 
-| Feature | Neverthrow | Effect | Awaitly |
+| Feature | neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
-| **Paradigm** | Functional (Chaining) | Functional (Blueprint) | Results first; workflows optional |
-| **Syntax** | `.andThen().map()` | `yield* Effect...` | Manual / `run(deps, fn)` / `await step(...)` |
-| **Learning Curve** | Low | High | Low |
-| **Inference** | Good | Excellent | Excellent (`ErrorsOf`, `run(deps)`, `createWorkflow`) |
-| **Circuit Breaker** | Manual | Manual | Built-in (optional) |
-| **Rate Limiting** | Manual | Manual | Built-in (optional) |
-| **Saga Pattern** | Manual | Manual | Built-in (optional) |
-| **Policies** | Manual | Via Schedule | Built-in (optional) |
-| **Durable Execution** | Manual | Manual | Built-in (optional) |
-| **Streaming** | Manual | Stream module | Built-in (optional) |
-| **Functional Utils** | Method chaining | pipe/flow | Sync `andThen`/`map`; async via `run` |
-| **Fetch Helpers** | Manual | HttpClient | `tryAsync` + native `fetch` |
-| **Lint Plugin** | ✓ (ESLint) | ✓ (ESLint, or `@effect/tsgo` through `tsc`) | ✓ (ESLint or oxlint) |
-| **Ecosystem** | Minimal | Massive | Focused |
+| **Paradigm** | Method chains | Describe, then run | Results; workflows optional |
+| **Syntax** | `.andThen().map()` | `yield* Effect...` | Manual / `run(deps, fn)` / `step` |
+| **Error union** | You declare it | Inferred on `Effect<A, E, R>` | `ErrorsOf` / `run` / `createWorkflow` |
+| **Circuit breaker** | You write it | Compose from `Schedule` | `createCircuitBreaker` (optional) |
+| **Rate limit** | You write it | `Schedule` / platform limiter | `createRateLimiter` (optional) |
+| **Saga** | You write it | You write it | `createSagaWorkflow` (optional) |
+| **Retry / timeout** | You write it | `Schedule` | Step options / policies (optional) |
+| **Durable execution** | You persist it | You persist it | `durable` (optional) |
+| **Streaming** | You write it | `Stream` module | `awaitly/durable` (optional) |
+| **Composition** | Method chaining | pipe / flow / gen | Sync `andThen`/`map`; async via `run` |
+| **HTTP** | `ResultAsync.fromPromise` | `HttpClient` | `tryAsync` + native `fetch` |
+| **Lint plugin** | ESLint | ESLint, or `@effect/tsgo` | ESLint or oxlint |
 
-**Choose based on:**
-- **Neverthrow:** Functional chains and a lightweight library for simple error handling.
-- **Effect:** Structured concurrency, DI with layers, powerful streams, and you can invest in learning FP.
-- **Awaitly:** Start with Results (`ok`/`err`) and manual checks + `ErrorsOf`. Add `run(deps, fn)` for composition; `createWorkflow()` when you need caching, resume, or policies.
+**Against common constraints:**
+- **Small Result type, method chains:** neverthrow.
+- **Layers, fibers, Stream, Schedule as one runtime:** Effect.
+- **`ok`/`err` on async/await, workflows only if cache keys or resume show up:** Awaitly.
