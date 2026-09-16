@@ -1,8 +1,6 @@
-# Advanced Error Handling: The Complete Guide
+# Implementations, migration, and numbers
 
-**Implementation details, migration strategies, and patterns that survived production**
-
-This document assumes you've read the [README.md](./README.md) and want to understand these error handling approaches in depth.
+Assumes you have read [README.md](./README.md). The same payment workflow, four ways, with the extra APIs the README left out.
 
 ## Table of Contents
 
@@ -12,11 +10,11 @@ This document assumes you've read the [README.md](./README.md) and want to under
 - [Testing Strategies](#testing-strategies)
 - [Performance Considerations](#performance-considerations)
 - [Error Recovery Patterns](#error-recovery-patterns)
-- [Production Battle Stories](#production-battle-stories)
+- [Worked examples](#worked-examples)
 
 ## Complete Implementation Examples
 
-We build a payment processing system four ways. It handles real money and cannot afford to lose a penny.
+The same payment four ways. Domain: do not lose a penny, do not charge twice.
 
 ### Shared Types and Infrastructure
 
@@ -66,7 +64,7 @@ export class PersistError extends Error {}
 export class TimeoutError extends Error {}
 ```
 
-### Approach 1: The Optimist (try/catch)
+### Approach 1: try/catch
 
 ```typescript
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -206,25 +204,11 @@ export async function createPaymentVanilla(
 }
 ```
 
-**What makes this challenging:**
+**Costs:**
 
-**1. Function signature lies**
+The signature is `Promise<{paymentId: string}>`. The five failure modes are not in it. Callers wrap the call in another `try/catch`. TypeScript will not tell you a handler is missing.
 
-It says `Promise<{paymentId: string}>` but doesn't tell you about the 5 ways it can fail.
-
-**2. Happy path is scattered**
-
-Try following the success story through the code. Good luck finding it between all the try/catch blocks.
-
-**3. Composition is painful**
-
-Calling this from another function requires more try/catch layers. The complexity multiplies.
-
-**4. The compiler can't help**
-
-TypeScript shrugs and wishes you luck. You'll discover missing error handling at 3 AM when payments are down.
-
-### Approach 2: The Realist (neverthrow)
+### Approach 2: neverthrow
 
 ```typescript
 import { Result, ResultAsync, ok, err, okAsync, errAsync } from 'neverthrow';
@@ -400,25 +384,11 @@ export function createPaymentNeverthrow(
 }
 ```
 
-**What makes this better:**
+**Fits this constraint:** `ResultAsync<{paymentId: string}, E>` names the error. `andThen` / `orElse` compose. Errors are values you `switch` on. `Result.fromThrowable()` wraps legacy throws.
 
-**1. Honest signatures**
+**Costs:** long payment flows nest, or you adopt `safeTry`. Retries, timeouts, cache keys, and resume are helpers you write. Gzip for `ok`/`err` is 1.94 KB.
 
-`ResultAsync<{paymentId: string}, Error>` tells you what to expect: a payment id or an `Error`, and no hidden exceptions.
-
-**2. Composable**
-
-Chain operations with `andThen`, handle errors with `orElse`. The flow is a pipeline, not a maze of try/catch blocks.
-
-**3. Errors are data**
-
-You can inspect, log, transform, and recover from errors without special syntax. Logging validation errors one way and database errors another is a `switch` on the tag.
-
-**4. Gradual adoption**
-
-Wrap legacy code with `Result.fromThrowable()` and migrate piece by piece. No need to rewrite your entire codebase at once.
-
-### Approach 3: The Orchestrator (Awaitly)
+### Approach 3: Awaitly
 
 ```typescript
 import {
@@ -623,39 +593,11 @@ export async function handleCreatePayment(
 }
 ```
 
-**What makes this work well:**
+**Fits this constraint:** async/await with `ok`/`err`. `step.retry` / `timeout` are options. Step `key` skips completed work on resume. The error union comes from the deps object.
 
-**1. Familiar async/await syntax**
+**Costs:** `createWorkflow` and `awaitly/durable` are a second surface. Gzip is 1.31 KB for `awaitly/result` and 18.1 KB for the full `awaitly` package. Wrapping a step in `try/catch` breaks error propagation; throwing APIs go through `step.try`. Interop with neverthrow needs a wrapper (`.isOk()` vs `.ok`).
 
-The code reads like standard JavaScript. No method chaining or generator syntax to learn. A developer new to the codebase can read it on day one.
-
-**2. Built-in retry and timeout**
-
-`step.retry()` handles exponential backoff with jitter out of the box, and takes `timeout` in the same options object. No custom retry logic, no extra library, and no `try`/`catch` around the step. Errors from a step propagate to the workflow result, so wrapping one in `try`/`catch` breaks that guarantee. To convert a *throwing* API into a typed error, `step.try(id, fn, { error | onError, retry?, timeout?, compensate? })` is the one wrapper that does it.
-
-**3. Step caching with keys**
-
-Each step has a `key` parameter. When you resume the workflow after a crash, it skips the steps that completed. Payment processing needs this, because a second charge is the failure you cannot undo.
-
-**4. Automatic error inference**
-
-The workflow computes the union of every error your dependencies can produce, so TypeScript knows the error set without a manual annotation.
-
-**5. Observability built-in**
-
-Since 4.5, runs, steps, retry attempts, parallel and race scopes, and saga compensations emit OpenTelemetry spans on their own. Register a provider once at startup and the workflow structure reaches your tracing backend with no adapter. Each step runs inside its own active span, so spans from clients you already instrument nest under the step that made the call. `onEvent` is still there for logging and debugging hooks that want the raw event stream.
-
-**6. Policy-driven configuration**
-
-Apply pre-built policies for common patterns: `withPolicy(servicePolicies.httpApi)` gives you 5-second timeout with 3 retries. Build consistent reliability across your entire codebase.
-
-**7. Production-grade reliability features**
-
-Circuit breakers, rate limiting, saga compensation, durable execution, and human-in-the-loop orchestration are all built-in. No need to implement these patterns yourself.
-
-### Awaitly Advanced Features
-
-Beyond basic workflows, Awaitly provides a comprehensive suite of production-ready features.
+### Awaitly extras used in this repo
 
 #### Durable Execution
 
@@ -704,7 +646,7 @@ if (!result.ok && isWorkflowCancelled(result.error)) {
 - **Concurrency control**: Prevent duplicate executions of the same workflow ID
 - **Drift detection**: A resume whose step order no longer matches the snapshot fails instead of replaying
 
-**Resume safety in Awaitly 4.** Bound step keys are position-derived (`getUser`, `getUser#2`, …), so inserting or reordering a dep call used to shift every later suffix. A resumed run could read a *different* step's checkpoint under the same key and carry on with the wrong value, and avoiding that depended on you remembering to bump `version`.
+**Resume safety in Awaitly.** Bound step keys are position-derived (`getUser`, `getUser#2`, …), so inserting or reordering a dep call used to shift every later suffix. A resumed run could read a *different* step's checkpoint under the same key and carry on with the wrong value, and avoiding that depended on you remembering to bump `version`.
 
 Snapshots now record the executed step order, and a mismatched resume fails with `WorkflowShapeDriftError`, carrying `workflowId`, `stepIndex`, `expectedStepKey`, and `actualStepKey`, rather than replaying against the wrong checkpoints. The new `onBeforeStep(stepKey, workflowId, context, info)` hook raises it, which fires before every step, including one about to be served from the cache or a snapshot, and before that stored value is read. That is the only point where the hook can still reject a stale checkpoint, since `onAfterStep` never fires for a replayed step:
 
@@ -945,7 +887,7 @@ const [user1, user2, user3] = await Promise.all([
 - Deduplicate API calls during page load
 - Share expensive computations across callers
 
-#### Streaming with Results (Awaitly 4)
+#### Streaming with Results (Awaitly)
 
 `awaitly/durable` provides Result-aware stream processing with transformers and backpressure handling:
 
@@ -982,8 +924,8 @@ await workflow.run(async ({ step, deps }) => {
   const reader = step.getReadable<string>({ namespace: 'input' });
   const writer = step.getWritable<string>({ namespace: 'output' });
 
-  // Data-first transformers, composed with pipe() (up to eight stages since
-  // Awaitly 4.1; nest another pipe() for more)
+  // Data-first transformers, composed with pipe() (up to eight stages;
+  // nest another pipe() for more)
   const processed = pipe(
     reader,
     (s) => map(s, (line) => line.toUpperCase()),
@@ -1002,7 +944,7 @@ await workflow.run(async ({ step, deps }) => {
 });
 ```
 
-**How stream failures surface (Awaitly 4.1):**
+**How stream failures surface:**
 
 `reader.read()` models a read failure as a Result, while iterating a reader with `for await`, a transformer, or `collect()` turns it back into a throw. Awaitly sorts the two cases at the workflow boundary:
 
@@ -1046,9 +988,9 @@ for (const item of hugeDataset) {
 - Fewer backpressure strategies
 - Simpler API trades off some power for familiarity
 
-#### Result Composition and HTTP Boundaries (Awaitly 4)
+#### Result Composition and HTTP Boundaries (Awaitly)
 
-Awaitly 4 collapses thirteen entry points into four. The release dropped nothing; the exports moved:
+Awaitly collapses thirteen entry points into four. The release dropped nothing; the exports moved:
 
 | Entry | Contents |
 | --- | --- |
@@ -1061,7 +1003,7 @@ Migration map: `awaitly/run`, `awaitly/workflow`, and `awaitly/reliability` → 
 
 Result combinators such as `map`, `andThen`, `all`, and `allAsync` come from the root or `awaitly/result`. Wrap native `fetch` with `tryAsync` and map failures into domain errors.
 
-#### step.sleep() with Duration Support (Awaitly 4)
+#### step.sleep() with Duration Support (Awaitly)
 
 Cancellation-aware delays with human-readable duration strings:
 
@@ -1128,7 +1070,7 @@ await run(async ({ step }) => {
 
 Catch common Awaitly mistakes at lint time. The plugin is written against the ESLint rule API, and oxlint loads it unchanged through `jsPlugins`, which is how this repo runs it. The config below is the ESLint form; the oxlint form in [`.oxlintrc.json`](./.oxlintrc.json) lists the same rules under the same names.
 
-Two rules are **gone** in v3: `workflow-prefer-step-if` and `workflow-prefer-step-foreach`. They existed only because the analyzer could not identify a raw `if` or `for...of` branch, so diagrams needed `step.if` / `step.forEach` wrappers to stay readable. Awaitly 4's analyzer derives a stable id from the branch's own expression (`user.isPremium` → `user-is-premium`), so plain control flow is diagrammable and the wrappers stopped earning their keep. Derivation stays conservative: an expression it cannot encode without loss, such as a call or arithmetic, yields no id and the node stays unlabelled. If your config still lists either rule, delete the entry: both linters error on unknown rule names.
+Two rules are **gone** in v3: `workflow-prefer-step-if` and `workflow-prefer-step-foreach`. They existed only because the analyzer could not identify a raw `if` or `for...of` branch, so diagrams needed `step.if` / `step.forEach` wrappers to stay readable. Awaitly's analyzer derives a stable id from the branch's own expression (`user.isPremium` → `user-is-premium`), so plain control flow is diagrammable and the wrappers stopped earning their keep. Derivation stays conservative: an expression it cannot encode without loss, such as a call or arithmetic, yields no id and the node stays unlabelled. If your config still lists either rule, delete the entry: both linters error on unknown rule names.
 
 ```javascript
 // eslint.config.mjs
@@ -1305,7 +1247,7 @@ await orchestrator.grantApproval(
 - **Notification channels**: Integrate with Slack, email, or custom UIs
 - **Webhook handlers**: Built-in handlers for approval/rejection endpoints
 
-### Approach 4: The Architect (Effect)
+### Approach 4: Effect
 
 ```typescript
 import { Effect, Layer, Context, Schedule, Duration } from 'effect';
@@ -1491,156 +1433,61 @@ export const runPayment = async (
 };
 ```
 
-**Why this is powerful:**
+**Fits this constraint:** timeouts, retries, and logging are values on the program. Layers swap Db and Provider in tests. One `Schedule` applies everywhere you pipe it.
 
-**1. Policies are first-class citizens**
-
-You declare timeouts, retries, and logging up front as policies, and you can see, test, and change each one on its own.
-
-**2. Perfect testability**
-
-Dependency injection through layers means you can swap real services for test implementations without mocking frameworks or complex setup.
-
-**3. Readable despite complexity**
-
-Effect.gen makes the code look synchronous even though it's handling complex orchestration. The control flow is clear.
-
-**4. Composable everywhere**
-
-Same retry logic across your entire app. Consistent error handling. Want to add tracing? Add it once, get it everywhere.
+**Costs:** Effect is a runtime. The payoff grows as more of the call graph lives inside it. This repo pins `effect@4.0.0-rc.112`. The beta-to-rc jump renamed `catchAll`, dropped `timeoutFail`, and moved retry options onto `Effect.retry`. `Effect.succeed` alone is 27.9 KB gzipped.
 
 ## The Mental Models Explained
 
-### try/catch: The Exception Model
+### try/catch: exceptions
 
-Think of exceptions as fire alarms. When something goes wrong:
+A throw stops the current frame. The runtime walks the stack for `catch`. Uncaught, the process dies.
 
-1. **ALARM!** An exception is thrown
-2. **EVACUATION!** Normal execution stops at that line
-3. **SEARCH FOR SAFETY!** The runtime looks up the call stack for a catch block
-4. **HANDLE OR PANIC!** Either someone catches it, or the whole program crashes
+This matches rare failures. Network timeouts and validation errors are routine; you still pay the unwind.
 
-This works well when failures are rare. Once they turn routine, like network timeouts and validation errors, you set off a fire alarm for events you expected.
+### neverthrow: two tracks
 
-**The problem with fire alarms for routine events:**
-
-Throwing an exception forces the runtime to:
-- Unwind the call stack
-- Search for a handler
-- Lose context about where you were
-- Make recovery harder than it needs to be
-
-### neverthrow: The Railway Model
-
-Imagine every function as a railway junction with two tracks:
-
-- **Success Track**: When everything works, the train stays on this track
-- **Error Track**: When something fails, the train switches to this track
-
-Once you're on the error track, you stay there until you handle the error and switch back to success. Error flow becomes visible and composable.
+`andThen` stays on Ok. `orElse` handles Err. Once you return `err`, later `andThen` callbacks do not run.
 
 ```typescript
-// Each operation is a junction
-validateInput(data) // Might switch to error track
-  .andThen(checkDuplicates) // Only runs if on success track
-  .andThen(callProvider) // Only runs if still on success track
-  .orElse(handleError); // Handles error track
+validateInput(data)
+  .andThen(checkDuplicates)
+  .andThen(callProvider)
+  .orElse(handleError);
 ```
 
-**Why this works better for business logic:**
+### Awaitly: Result, then optional steps
 
-The railway model makes failure a first-class concept. You can see the success path and the error path. You can handle specific errors at specific points. And you can compose operations without losing error information.
+Level 1 is `ok`/`err`, same as neverthrow. Level 2 is `await` plus a check, or `run(deps, fn)`. Level 3 is `createWorkflow` / `durable`: named steps, keys, policies.
 
-### Awaitly usage levels
+See [api-comparison.md](./src/comparison/api-comparison.md) for Level 1 and 2 samples.
 
-Awaitly stacks three optional layers. You can stop at any one.
-
-| Level | Import | When |
+| Level | Import | Use |
 |-------|--------|------|
-| Results only | `awaitly` or `awaitly/result` | Drop-in neverthrow alternative |
-| Composition | Manual checks + `ErrorsOf`, or `run(deps, fn)` | Async sequential work without workflows |
-| Orchestration | `createWorkflow`, `durable` | Caching, resume, HITL, policies |
-
-Entry points:
+| Results | `awaitly` or `awaitly/result` | Same job as neverthrow `ok`/`err` |
+| Composition | checks + `ErrorsOf`, or `run(deps, fn)` | Multi-step async without workflows |
+| Orchestration | `createWorkflow`, `durable` | Keys, resume, HITL, policies |
 
 | Module | Purpose |
 |--------|---------|
 | `awaitly` | `ok`, `err`, combinators, `tryAsync`, `run`, `createWorkflow`, step helpers |
-| `awaitly/result` | Result primitives only, for the minimal-bundle case |
-| `awaitly/durable` | Persist and resume workflows, sagas, HITL, streaming, webhooks, engine |
-| `awaitly/testing` | `unwrapOk`, `unwrapErr`, harnesses, `testWorkflow` |
-
-See [api-comparison.md](./src/comparison/api-comparison.md) for Level 1 and 2 examples.
-
-### Awaitly: The Conductor Model (Level 3)
-
-At Level 3, you coordinate dependencies through `step()` inside `run()` or `createWorkflow()`. Levels 1 and 2 do not require this model.
-
-- **The Score**: Your workflow function is the sheet music
-- **The Musicians**: You inject dependencies and call them through `step()`
-- **House Rules (Policies)**: You set timeouts, retries, and rate limits before the performance
-- **Skip Failing Sections (Circuit Breakers)**: If a section keeps failing, skip it until it recovers
-- **Control Section Tempo (Rate Limiting)**: Ensure sections don't play too fast for the venue
-- **Pause for Conductor's Signal (HITL)**: Wait for approval before critical movements
-- **Undo Movements (Saga Compensations)**: If the finale fails, undo earlier movements in reverse
-- **Early Exit**: If any musician misses their cue (error), the performance stops
-- **Caching**: You can mark certain passages to avoid repeating them
-- **Resume**: If the concert is interrupted, you can restart from the last completed movement
+| `awaitly/result` | Result primitives only |
+| `awaitly/durable` | Persist and resume, sagas, HITL, streaming |
+| `awaitly/testing` | `unwrapOk`, `unwrapErr`, `testWorkflow` |
 
 ```typescript
-// The conductor coordinates the performance
 workflow.run(async ({ step, deps }) => {
-  const user = await step('fetchUser', () => deps.fetchUser(id));    // Violin section
-  const posts = await step('fetchPosts', () => deps.fetchPosts(id));  // Brass section
-  return { user, posts };                                // Final bow
+  const user = await step('fetchUser', () => deps.fetchUser(id));
+  const posts = await step('fetchPosts', () => deps.fetchPosts(id));
+  return { user, posts };
 });
 ```
 
-**Why this model works:**
+### Effect: describe, then run
 
-It combines the familiarity of async/await with the safety of Result types. You write code that looks like standard JavaScript, and the types track the errors, the steps carry the retries, and the workflow resumes.
+You write an `Effect`. Layers supply Db and Provider. `Schedule` is retry/timeout. `Effect.runPromise` executes.
 
-**The full orchestra:**
-
-When you need production-grade reliability, the conductor has access to a full ensemble of tools:
-
-```typescript
-// The full orchestra
-const saga = createSagaWorkflow('apiCall', deps); // Automatic compensation
-const breaker = createCircuitBreaker('api'); // Fail-fast protection
-const limiter = createRateLimiter('api', { maxPerSecond: 10 }); // Tempo control
-
-await saga.run(async ({ step, deps }) => {
-  // Rate-limited, circuit-protected, compensating steps
-  const data = await limiter.execute(() =>
-    breaker.executeResult(() =>
-      step('callApi', () => deps.callApi(), {
-        compensate: (d) => deps.rollback(d.id),
-      }),
-    ),
-  );
-  return data;
-});
-```
-
-### Effect: The Blueprint Model
-
-Effect treats your program like architectural blueprints:
-
-1. **Description**: You describe what should happen, not how
-2. **Policies**: You declare policies (timeouts, retries, etc.) apart from the logic
-3. **Dependencies**: You specify what services you need
-4. **Execution**: The runtime figures out how to make it happen
-
-This separation lets you test, change, and reason about each concern on its own.
-
-**Why blueprints matter:**
-
-When you separate description from execution, you gain:
-- The ability to test without side effects
-- The ability to modify policies without changing business logic
-- The ability to visualize and reason about your program structure
-- Swapping implementations (test vs production) with one layer
+Tests provide a test layer. Policies change without rewriting the payment body.
 
 ## Migration Strategies
 
@@ -1656,42 +1503,39 @@ Start here. Build basic functionality, ship features, identify pain points where
 - Your error handling code is as complex as your business logic
 - You need to compose operations but try/catch makes it painful
 
-**Phase 2: Core Domain (introduce Result types)**
+**Phase 2: Core domain (Result types)**
 
-Refactor your most complex business logic to use Result types (neverthrow or Awaitly). Keep try/catch at system boundaries (HTTP handlers, event listeners, etc.). Expand the Result-based code one module at a time.
+Move the densest business logic to neverthrow or Awaitly Results. Keep try/catch at HTTP handlers and event listeners. Convert one module at a time.
 
-**Choosing between neverthrow and Awaitly:**
-- **neverthrow**: If your team likes functional chaining (`.andThen().map()`) and you don't need retry/timeout built-in
-- **Awaitly Level 1**: Same Result model as neverthrow (`ok`/`err`, combinators). No workflows required.
-- **Awaitly Level 3**: Add `run()`/`createWorkflow` when caching, resume, or policies appear
+Pick the Result library by call style:
+- **neverthrow:** `.andThen().map()`. You write retry and timeout.
+- **Awaitly:** `ok`/`err` on async/await. `createWorkflow` is a later step, not this one.
 
-Both libraries let you move one function at a time, which is what makes this phase safe. Awaitly keeps the call site on `await` and adds a check, so the surrounding code and your team's mental model stay as they were:
+neverthrow:
 
 ```typescript
-// Before: a promise that throws
-const user = await fetchUser(id);
+const result = await fetchUser(id);
+if (result.isErr()) return result;
+const user = result.value;
+```
 
-// After: a Result, still awaited
+Awaitly:
+
+```typescript
 const result = await fetchUser(id);
 if (!result.ok) return result;
 const user = result.value;
 ```
 
-Functions you haven't converted keep working, so you can stop the migration at any point and ship.
+Unconverted functions keep working.
 
-**When to move to Phase 3:**
-- You need consistent policies (timeouts, retries) across your app
-- You're implementing the same infrastructure patterns in service after service
-- Testing requires complex mocking and setup
-- Your team is comfortable with functional programming concepts
+**Phase 3: policies**
 
-**Phase 3: Policies (consider Effect or Awaitly's advanced features)**
+If you already run Effect, use `Schedule` and `Layer`. If you already run Awaitly workflows, use step retry/timeout. If you are on neverthrow, write helpers or change library. Do not treat this phase as "adopt Awaitly".
 
-If you chose Awaitly, you may already have what you need in retries, timeouts, circuit breakers, and tracing. Reach for Effect when you need layers or structured concurrency.
+**Phase 4: Effect as the runtime**
 
-**Phase 4: Full Architecture (Effect)**
-
-Only when you have complex orchestration needs. When consistent policies become important across your app. When your team is ready for the investment.
+Use this when layers, fibers, and one policy graph across the call graph are the point. It is an adoption, not a sprinkle.
 
 ### Practical Migration Tactics
 
@@ -2300,48 +2144,33 @@ Your test implementations are plain objects, with no setup or teardown.
 
 Effects are descriptions of work, not the work itself. You can inspect, modify, and test them without running side effects.
 
-### Feature Comparison: Awaitly vs Effect
-
-Both Awaitly and Effect provide production-grade reliability features, but with different philosophies:
+### Awaitly vs Effect (orchestration extras)
 
 | Feature | Awaitly | Effect |
 |---------|---------|--------|
-| **Syntax** | async/await + `step()` | Functional composition with generators |
-| **Learning curve** | Familiar to JS developers | Requires functional programming knowledge |
-| **Saga Pattern** | `createSagaWorkflow` (first-class) | Manual via effect handlers |
-| **Durable Execution** | `durable.run` (built-in) | Custom persistence adapters |
-| **Circuit Breaker** | `createCircuitBreaker` with presets | Custom implementation required |
-| **Rate Limiting** | `createRateLimiter`, `createConcurrencyLimiter` | Custom implementation required |
-| **Policies** | `servicePolicies` + registry | Via `Schedule` |
-| **Human-in-the-Loop** | `createHITLOrchestrator` (built-in) | Custom implementation required |
-| **Singleflight** | `singleflight()` with TTL caching | Custom implementation required |
-| **Streaming** | `awaitly/durable` with transformers | Effect Stream (more powerful) |
-| **Result composition** | Root/result combinators | Built-in pipe/flow |
-| **HTTP Client** | Native `fetch` wrapped with `tryAsync` | HttpClient (more configurable) |
-| **Sleep/Duration** | `step.sleep('id', '5s')` | `Effect.sleep(Duration.seconds(5))` |
-| **Lint Plugin** | `eslint-plugin-awaitly` v4.0 (22 rules, ESLint or oxlint) | `@effect/eslint-plugin`, or `@effect/tsgo` diagnostics through `tsc` |
-| **Dependency Injection** | Dependencies object to workflow | Layers and Context |
-| **Structured Concurrency** | Via `step.all()` | Built-in with fibers |
-| **Observability** | Automatic OpenTelemetry spans, plus an `onEvent` callback | Built-in tracing and metrics |
-| **Bundle Size** | ~8-15KB (tree-shakeable) | ~50KB+ |
+| **Call style** | async/await + `step()` | `gen` / pipe |
+| **Saga** | `createSagaWorkflow` | You write compensations |
+| **Crash resume** | `durable.run` | You persist it |
+| **Circuit breaker** | `createCircuitBreaker` | Compose from `Schedule` / defect handling |
+| **Rate limit** | `createRateLimiter` | `Schedule` / platform limiter |
+| **Retry / timeout** | Step options / `servicePolicies` | `Schedule` |
+| **HITL** | `createHITLOrchestrator` | You persist the pause |
+| **Streaming** | `awaitly/durable` transformers | `Stream` (windowing, merge, split) |
+| **HTTP** | native `fetch` + `tryAsync` | `HttpClient` |
+| **DI** | deps object | Layers and Context |
+| **Concurrency** | `step.all()` | Fibers |
+| **Gzip (measured below)** | 18.1 KB full `awaitly` | 27.9 KB `Effect.succeed` alone |
 
-**When to choose Awaitly:**
-- Team familiar with async/await, less with FP
-- Need production reliability features out of the box
-- Want saga pattern and HITL without custom code
-- Bundle size matters but you need more than neverthrow
-
-**When to choose Effect:**
-- Team comfortable with functional programming
-- Need dependency injection with layers
-- Want structured concurrency with fiber semantics
-- Building complex domain models with type-safe errors
+**Against this constraint:**
+- **async/await + step keys / HITL / sagas:** Awaitly `durable`.
+- **Layers, fibers, Stream, Schedule as one runtime:** Effect.
+- **Result type, you will write the rest:** neverthrow.
 
 ## Performance Considerations
 
 ### Bundle Size Impact
 
-The first question everyone asks: how much does this cost? Measured with esbuild 0.28 (`--bundle --minify`, ESM), importing only the names on each line:
+Measured with esbuild 0.28 (`--bundle --minify`, ESM), importing only the names on each line:
 
 | What you import | Minified | Gzipped |
 |-----------------|----------|---------|
@@ -2355,7 +2184,7 @@ Reproduce these by bundling a file that imports only those names. Your own numbe
 
 **When bundle size matters:**
 
-On mobile, in edge functions, and anywhere kilobytes are budgeted, try/catch's zero overhead is hard to beat. neverthrow stays tiny and does a lot with it. Awaitly starts smaller still if you import `awaitly/result`, and grows as you pull in workflows, retries, and caching, so you can defer that cost until a feature needs it. Effect's figure reflects a runtime rather than a helper library, and it buys structured concurrency, layers, and scheduling that the others do not attempt. Weigh it against what you would otherwise build by hand.
+On mobile and in edge functions, try/catch is 0 KB. neverthrow `ok`/`err` is 1.94 KB gzipped. `awaitly/result` is 1.31 KB gzipped; the full `awaitly` entry (run, workflows) is 18.1 KB. `Effect.succeed` alone is 27.9 KB gzipped because you are pulling a runtime. Weigh that against the retries, layers, or resume you would otherwise write.
 
 ### Runtime Characteristics
 
@@ -2385,35 +2214,13 @@ The runtime system adds consistent overhead but provides more features and bette
 
 ### When Performance Matters
 
-**Choose try/catch when:**
+**try/catch:** 0 KB extra. Exceptions are cheap until they throw.
 
-- Bundle size is critical (mobile, edge functions)
-- Happy path performance is paramount
-- Error rates stay below 0.1%
-- You're at system boundaries where exceptions are expected
+**neverthrow:** Result object per call, no runtime. You write retry.
 
-**Choose neverthrow when:**
+**Awaitly:** Result object plus `step()` bookkeeping when you use workflows.
 
-- You need predictable performance
-- Error rates are moderate (0.1% to 10%)
-- Bundle size is a reasonable concern but not critical
-- You want composability without runtime overhead
-- You prefer functional chaining style
-
-**Choose Awaitly when:**
-
-- You need retries, timeouts, and caching built-in
-- Predictable performance matters
-- Bundle size is not critical but not unlimited
-- You prefer async/await syntax
-- You need workflow resume or observability
-
-**Choose Effect when:**
-
-- Complex orchestration outweighs performance cost
-- Consistent performance is more important than peak performance
-- Bundle size is not a constraint
-- You need layers, structured concurrency, or fibers
+**Effect:** runtime overhead on every effect. Layers, fibers, and Schedule are what you pay for.
 
 ## Error Recovery Patterns
 
@@ -2820,92 +2627,22 @@ const result = await workflow.run(async ({ step, deps }) => {
 
 External APIs have rate limits. Database connections are finite. Without explicit control, you hit those limits during traffic spikes, when you need reliability most.
 
-## Production Battle Stories
+## Worked examples
 
-### Story 1: The Payment Processor That Learned to Fail Well
+These are sketches, not case studies. No uptime numbers. The code in `src/` is the evidence.
 
-**The Problem**
+**Provider outage, core payments already on Results.** Map `ProviderUnavailable` to a fallback provider or a pending state. neverthrow does this with `orElse`. Exceptions that escape the handler still take down the request if you left try/catch in the domain.
 
-A payment processor was using try/catch everywhere. When their primary payment provider had an outage, the entire service went down because exceptions were bubbling up and crashing request handlers.
+**Timeouts and retries on a service that already runs Effect.** Put `Schedule` on `callProvider`. Swap the live provider layer for a test layer that fails twice. You do not add a second orchestration library.
 
-**The Solution**
+**Charge must not repeat after a crash.** Awaitly step `key` plus `durable.run` skips the provider call on resume. neverthrow and Effect persist that checkpoint yourselves.
 
-They migrated their core payment logic to neverthrow, allowing them to:
+**HTTP edge of a mixed codebase.** Keep try/catch in the handler. Convert one domain function at a time to `Result`. Wrappers in the migration section bridge the two.
 
-- Implement fallback payment providers
-- Degrade to "payment pending" mode
-- Log detailed error information without crashing
-
-**The Result**
-
-99.9% uptime even when individual providers failed. Customer support calls dropped by 80% during provider outages.
-
-### Story 2: The Microservice That Couldn't Scale
-
-**The Problem**
-
-A microservice was taking on more load, and its error handling sat in try/catch blocks scattered across the code. When they needed to add timeouts, retries, and circuit breakers, the code became unmaintainable.
-
-**The Solution**
-
-They evaluated Effect and Awaitly. Effect's learning curve was too steep for the team's timeline, so they chose Awaitly, which allowed them to:
-
-- Add retry and timeout policies with `step.retry()` and `step.withTimeout()`
-- Implement circuit breakers for external services
-- Add observability via the `onEvent` hook without changing business logic
-
-**The Result**
-
-Reduced incident response time from hours to minutes. The team reported that debugging got easier because they could trace which step failed and why.
-
-### Story 3: The Legacy Migration That Didn't Break Everything
-
-**The Problem**
-
-A large e-commerce platform wanted to improve error handling but couldn't afford to rewrite their entire system. They had millions of lines of code using try/catch.
-
-**The Solution**
-
-They used the boundary strategy:
-
-- Kept try/catch at HTTP handlers and database layers
-- Converted core business logic to neverthrow, one module at a time
-- Used wrapper functions to bridge between paradigms
-
-**The Result**
-
-Improved error handling without any customer-facing downtime. The team took 6 months, one feature at a time.
-
-### Story 4: The Workflow That Needed to Survive Crashes
-
-**The Problem**
-
-A long-running data processing pipeline crashed mid-execution every few weeks. When restarted, it would re-process everything from the beginning, causing duplicate charges and wasted compute.
-
-**The Solution**
-
-They adopted Awaitly with step caching and resume state:
-
-- Each step was given a unique `key` for caching
-- The `onEvent` hook persisted step results to a database
-- On restart, the workflow resumed from the last successful step using `resumeState`
-
-**The Result**
-
-Zero duplicate processing. Crash recovery went from "restart everything" to "resume from last checkpoint" in under a minute.
-
-### Story 5: The Approval Workflow That Needed to Pause
-
-**The Problem**
-
-A compliance team needed multi-level approval for high-value transactions: manager approval for orders over $10K, VP approval for orders over $100K. Their existing system used polling and manual status checks, leading to missed SLAs and audit gaps.
-
-**The Solution**
-
-They implemented Awaitly's Human-in-the-Loop orchestration:
+**Pause for a human.** Awaitly HITL stores the pause. Effect and neverthrow store that flag in your DB. Sketch of the Awaitly shape:
 
 ```typescript
-import { createHITLOrchestrator, createApprovalStep } from 'awaitly/durable';
+import { createHITLOrchestrator, pendingApproval } from 'awaitly/durable';
 
 const orchestrator = createHITLOrchestrator({
   approvalStore: redisApprovalStore,
@@ -2915,67 +2652,34 @@ const orchestrator = createHITLOrchestrator({
       await slack.postMessage({
         channel: '#approvals',
         text: `Order ${ctx.metadata.orderId} needs ${ctx.reason}`,
-        attachments: [{ actions: [approveButton, rejectButton] }],
       });
     },
   },
 });
 
-const processHighValueOrder = async (order) => {
-  return orchestrator.execute('high-value-order', workflowFactory, async ({ step, deps, args: input }) => {
+await orchestrator.execute(
+  'high-value-order',
+  workflowFactory,
+  async ({ step, deps, args: input }) => {
     const validated = await step('validateOrder', () => deps.validateOrder(input));
-
-    if (validated.total > 100000) {
-      await step('pendingApproval', () => pendingApproval('VP approval required'), {
-        key: `vp-approval:${input.orderId}`,
-      });
-    } else if (validated.total > 10000) {
+    if (validated.total > 10000) {
       await step('pendingApproval', () => pendingApproval('Manager approval required'), {
         key: `manager-approval:${input.orderId}`,
       });
     }
-
     await step('processPayment', () => deps.processPayment(validated));
-    return { orderId: input.orderId, status: 'completed' };
-  }, order);
-};
+    return { orderId: input.orderId };
+  },
+  order,
+);
 ```
 
-**The Result**
+## Costs, again
 
-- 99% SLA compliance (approvals completed within target time)
-- Complete audit trail with timestamps, approvers, and decision history
-- Slack integration meant approvers could approve from mobile
-- Workflow state persisted across deployments and restarts
+- **try/catch:** missed `catch`. Zero extra bytes.
+- **neverthrow:** you write retry, timeout, and resume. 1.94 KB gzipped for `ok`/`err`.
+- **Effect:** you learn a runtime and pin v4 RC. 27.9 KB gzipped for `Effect.succeed` alone.
+- **Awaitly:** you add `createWorkflow` / `durable` when keys or resume show up. 1.31 KB gzipped for `awaitly/result`, 18.1 KB for full `awaitly`.
 
-## The Final Word
+The tests in [src/](./src/) run the same payment four ways. Read those before you pick.
 
-Pick the approach that fits your context rather than the one that wins an argument. Weigh these:
-
-**Team expertise**
-
-How comfortable is your team with functional programming? If everyone knows JavaScript but nobody knows functional patterns, neverthrow will require training. Effect even more so. Awaitly sits in the middle: familiar async/await syntax with Result types.
-
-**System complexity**
-
-Count your failure modes. A CRUD app does fine on try/catch, and a distributed system earns back Effect's tooling. Awaitly suits the middle: systems that need retries, timeouts, and observability without full dependency injection.
-
-**Performance requirements**
-
-Are milliseconds critical, or is reliability more important? High-frequency trading systems care about nanoseconds. Most web apps care about correctness first.
-
-**Migration constraints**
-
-Are you working with legacy code or starting fresh? Greenfield projects have more flexibility. Legacy systems need gradual migration strategies.
-
-**Feature requirements**
-
-Do you need retries and timeouts? Awaitly and Effect have them built-in. neverthrow doesn't. Do you need workflow resume? Awaitly has it. Do you need dependency injection with layers? Effect has it.
-
-Start simple and evolve as the code asks for it. The error handling strategy worth having is the one that lets you sleep at night.
-
-When your pager goes off at 3 AM because payments are down, you'll thank yourself for thinking this through.
-
-***
-
-For more examples and working code, check out the [src/](./src/) directory.

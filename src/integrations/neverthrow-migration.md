@@ -1,19 +1,12 @@
 # Migrating from neverthrow to Awaitly
 
-A gradual migration guide for teams using neverthrow. Awaitly matches neverthrow at the Result layer (`ok`/`err`, `AsyncResult`). Composition via `run(deps, fn)` and workflows are optional add-ons.
+Awaitly-only note. Stay on neverthrow if method chaining is how the team writes Results and you do not need step keys or resume. This page is for teams that already decided to move.
 
-## Why Migrate?
+Awaitly matches neverthrow at `ok`/`err` / `AsyncResult`. `run(deps, fn)` and workflows are extra.
 
-**Result layer: same model as neverthrow**
-- Type-safe Result types (`ok`, `err`, `Result`, `AsyncResult`)
-- Explicit error handling
-- Sync data-first combinators (`andThen`, `map`, `allAsync`) as an alternative to method chaining
+## Why someone moves
 
-**Composition and workflows: optional extras**
-- `tryAsync` for HTTP and other throwing boundaries
-- Manual checks + `ErrorsOf`, or `run(deps, fn)` for multi-step async flows
-- `createWorkflow()` for step caching, resume, and production orchestration
-- Policies, circuit breakers, sagas, streaming
+Same Result model, data-first `andThen`/`map` instead of methods, and optional `createWorkflow` for keys and resume. neverthrow stays smaller if you never take those extras (1.94 KB gzipped for `ok`/`err` vs 18.1 KB for full `awaitly`).
 
 ## Drop-in replacement (no workflows)
 
@@ -123,7 +116,7 @@ const level2 = await run({ fetchUserAwaitly, fetchPosts }, async (s) => {
 
 ## Migration Strategies
 
-### Strategy 1: Parallel Adoption (Recommended)
+### Strategy 1: Parallel adoption
 
 Keep neverthrow in existing code, use Awaitly in new modules:
 
@@ -318,14 +311,9 @@ const fetchUser = wrapNeverthrow(legacyFetchUser);
 const user = await step('getUser', () => fetchUser(id));
 ```
 
-## When to Keep neverthrow
+## When to keep neverthrow
 
-Don't migrate everything! Keep neverthrow when:
-
-1. **The code is stable and working**: "If it ain't broke, don't fix it"
-2. **You prefer method chaining**: Some teams find `.andThen().map()` more readable
-3. **You don't need workflows**: Simple Result functions don't benefit from `createWorkflow`
-4. **Library code**: Consumers might expect neverthrow types
+Stay if the code works, the team prefers `.andThen().map()`, you do not need step keys or resume, or your public API already exposes neverthrow types.
 
 ## Migration Checklist
 

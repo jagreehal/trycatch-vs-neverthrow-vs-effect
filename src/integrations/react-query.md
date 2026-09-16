@@ -1,6 +1,6 @@
 # Using React Query with Awaitly
 
-Combine TanStack Query's server state management with Awaitly's typed Results for exhaustive error handling in your React components.
+Awaitly-only. Keep TanStack Query; put `Result` on the server function.
 
 ## Why Combine Them?
 

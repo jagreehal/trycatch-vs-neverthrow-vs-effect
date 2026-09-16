@@ -1,22 +1,18 @@
-# Real-World Scenario: E-commerce Checkout
+# Checkout: parallel work, five error types
 
-**Scenario:** A checkout flow involving Cart Validation, Inventory Checks (parallel), Pricing (parallel), Inventory Reservation, Payment, and Order Creation.
-**Key Constraints:** Multiple failure points, diverse error types, need for parallel execution.
+Cart validation, inventory and pricing in parallel, reservation, payment, order creation. The constraint is the error union and the parallel steps, not the library.
 
-See the code: `ecommerce-checkout.test.ts`
+See `ecommerce-checkout.test.ts`.
 
 ## The Approaches
 
-### 1. The Awaitly Approach
+### 1. Awaitly
 
-*This scenario uses `createWorkflow` because checkout needs parallel steps and automatic error inference. For typed Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).*
+This sample uses `createWorkflow` because the test needs named parallel steps and an inferred error union. For Results without workflows, see [api-comparison.md §1–2](./api-comparison.md).
 
-*Automatic Error Unions & Flat Flow.*
-
-The main advantage here is **Automatic Error Inference**. Checkout fails in five ways (`ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, `OrderError`), and Awaitly infers that union for you.
+Checkout fails as `ValidationError`, `InventoryError`, `PricingError`, `PaymentError`, or `OrderError`. `createWorkflow` infers that union from the deps object.
 
 ```typescript
-// Type inference works automatically
 import { createWorkflow, allAsync } from 'awaitly';
 
 const workflow = createWorkflow('checkout', { validateCart, checkInventory, getPricing, ... });
@@ -35,15 +31,10 @@ return workflow.run(async ({ step, deps }) => {
 });
 ```
 
-**Awaitly 4 removed a failure mode here.** In Awaitly 3, `allAsync` caught promise rejections and reported `PromiseRejectedError`, so every caller had to widen its union and remap that case back into the domain (`isPromiseRejectedError(error) ? 'OUT_OF_STOCK' : error`), reaching for a `step.fromResult` with an `onError` mapper to launder an error nobody modelled. A rejection is a thrown exception, and `UnexpectedError` already covers those, so `allAsync` and `anyAsync` no longer report it. The parallel inventory check is now a plain `step()` whose error type is the union the deps declare.
 
-Two related tightenings: `any` / `anyAsync` now require a non-empty array (an empty one is a compile error, and `EmptyInputError` is gone from the return type), and when every racer in `anyAsync` fails, a modelled error always wins over a thrown one instead of whichever settled first. `allSettledAsync` is unchanged, since reporting every outcome, `PromiseRejectedError` included, is what it is for.
+**Fits this constraint:** the error union comes from the deps object, so you skip a handwritten `Result<Order, E1 | E2 | ...>`. `step()` exits on the first `err`. `createSagaWorkflow` runs compensations LIFO if shipping fails after a charge.
 
-**Pros:**
-- **Type Safety without Boilerplate:** You don't need to hand-write `Result<Order, Error1 | Error2 | Error3 ...>`.
-- **Flat Structure:** Async/await keeps the code linear, even with 6+ steps.
-- **Early Exit:** If the cart is invalid, it stops on that line. No need to check `.isErr()` after every line.
-- **Saga Pattern:** For checkout flows that need rollback (refund payment if shipping fails), Awaitly provides `createSagaWorkflow` with automatic LIFO compensation.
+**Costs:** you take a workflow wrapper to get that inference. `allAsync` no longer reports `PromiseRejectedError`; a rejection is `UnexpectedError`.
 
 **What the analyzer sees.** `awaitly-analyze src/comparison/ecommerce-checkout.test.ts` reads the named `run('checkout', ...)` form and lists the three parallel `allAsync` groups in order, each with the error its deps can produce:
 
@@ -99,10 +90,9 @@ const result = await checkout.run(async ({ step, deps }) => {
 });
 ```
 
-### 2. The Neverthrow Approach
-*Explicit, but verbose.*
+### 2. neverthrow
 
-Neverthrow asks you to name the error union yourself, which stays clear and takes more upkeep as the flow grows. Chaining also puts earlier variables such as `cart` out of reach deep in the chain unless you thread them through each callback, which is what `safeTry` exists to solve.
+You name the error union. Chaining puts `cart` out of reach unless you thread it through each callback, which is why `safeTry` exists.
 
 ```typescript
 // Requires explicit error typing or loose 'any'
@@ -113,30 +103,22 @@ ResultAsync.combine([inventory, pricing])
   })
 ```
 
-**Pros:**
-- **Explicit:** You know what is happening at every step.
-- **Functional:** Great if you prefer `pipe` style data transformations.
+**Fits this constraint:** every step is a visible `andThen`. You see the union because you wrote it.
 
-**Cons:**
-- **Variable Scoping:** Accessing variables from 3 steps ago inside a `.andThen` callback is painful (variable shadowing or drilling).
-- **Boilerplate:** Writing large Error Union types by hand.
+**Costs:** six-step checkout nests, or you switch to `safeTry`. Parallel inventory plus pricing is `ResultAsync.combine`, with no fiber cancellation.
 
-### 3. The Effect Approach
-*Powerful Concurrency.*
+### 3. Effect
 
-Effect shines in the parallel section (`Inventory` + `Pricing`). Its concurrency controls are best-in-class.
+Inventory and pricing run together. Effect cancels the sibling when one fails.
 
 ```typescript
 // Powerful concurrency controls
 yield* Effect.all([checkInventory, getPricing], { concurrency: 'unbounded' });
 ```
 
-**Pros:**
-- **Structured Concurrency:** When one parallel task fails, Effect cancels the others and frees the resources.
-- **Generators:** Solves the "Variable Scoping" problem Neverthrow has (all variables in scope).
+**Fits this constraint:** `Effect.all` plus interruption. `Effect.gen` keeps `cart` in scope. `Schedule` is the retry/timeout policy.
 
-**Cons:**
-- **Types:** While strong, the error types can get complex to read in tooltips.
+**Costs:** error-channel tooltips get wide. Rollback is yours to write; there is no `createSagaWorkflow` equivalent in core.
 
 **What the analyzer sees.** `effect-analyze src/comparison/ecommerce-checkout.test.ts` draws the fork for inventory and pricing, and each `Effect.forEach` as a loop over `validatedCart.items`. Style lines trimmed:
 
@@ -190,22 +172,19 @@ flowchart TB
 
 ## Comparison Table
 
-| Feature | Awaitly | Neverthrow | Effect |
+| Feature | neverthrow | Effect | Awaitly |
 | :--- | :--- | :--- | :--- |
-| **Error Types** | Auto-inferred Union | Manual Union | Auto-inferred (Generic) |
-| **Flow Control** | Linear (Async/Await) | Nested (Callbacks) | Linear (Generators) |
-| **Variable Access**| Easy (Block Scope) | Hard (Closure Scope) | Easy (Block Scope) |
-| **Parallelism** | Good | Good | Excellent (Interruption) |
-| **Saga/Rollback** | Built-in (`createSagaWorkflow`) | Manual | Manual |
-| **Circuit Breaker** | Built-in | Manual | Manual |
+| **Error union** | You declare it | Inferred on `Effect<A, E, R>` | Inferred from deps (`createWorkflow`) |
+| **Flow** | `.andThen` / `safeTry` | `Effect.gen` | async/await |
+| **Earlier values** | Thread through callbacks | Block scope in `gen` | Block scope |
+| **Parallel + cancel siblings** | `combine` (no interruption) | `Effect.all` with interruption | `allAsync` (no fiber cancel) |
+| **Saga / rollback** | Write compensations | Write compensations | `createSagaWorkflow` |
+| **Retry / timeout** | Write helpers | `Schedule` | step options / policies |
 
-### HTTP Boundaries with Awaitly 4
+HTTP in this repo: native `fetch` wrapped with Awaitly `tryAsync`, or Effect `HttpClient`, or neverthrow `ResultAsync.fromPromise`. None of the three owns HTTP policy for you.
 
-Awaitly 4 has no `awaitly/fetch`. Use native `fetch` and wrap the boundary with `tryAsync`, mapping transport and status failures into the checkout domain error union. This keeps HTTP policy application-specific while preserving typed workflow errors.
+## Against this constraint
 
-## Conclusion
-
-For **Complex Business Logic (like Checkout)**:
-- **Awaitly** is the winner for **DX** and **Production Reliability**. Automatic error inference, familiar async/await syntax, built-in saga pattern for rollback scenarios, plus type-safe fetch helpers for external APIs.
-- **Effect** is the winner for **Structured Concurrency**. If you need fiber-based cancellation and are comfortable with functional programming.
-- **Neverthrow** is solid for simple cases but gets verbose with complex variable dependencies and lacks built-in reliability features.
+- **Fewest lines to keep `cart` in scope while running inventory and pricing together:** Effect `gen`, or Awaitly `async/await`. neverthrow pays in nesting or `safeTry`.
+- **Sibling cancellation when one parallel check fails:** Effect.
+- **Named LIFO compensations after a charge:** Awaitly `createSagaWorkflow`. The other two write the rollback by hand.

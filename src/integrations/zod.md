@@ -1,6 +1,6 @@
 # Using Zod with Awaitly
 
-Turn Zod validation errors into typed Results for seamless composition in workflows.
+Awaitly-only. Map `safeParse` to `Result`.
 
 ## Why Combine Them?
 
